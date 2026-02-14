@@ -1,6 +1,6 @@
 # Stellar Token Deployer
 
-A user-friendly dApp for quick token deployment on Stellar, targeting creators in Nigeria and emerging markets.
+A user-friendly dApp for quick token deployment on Stellar.
 
 ## Project Structure
 
@@ -63,10 +63,6 @@ cargo test
 cd frontend
 npm test
 ```
-
-## Deployment
-
-See `.kiro/specs/stellar-token-deployer/design.md` for detailed deployment instructions.
 
 ## License
 
