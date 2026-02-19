@@ -33,9 +33,40 @@ fn test_cannot_initialize_twice() {
 
     let admin = Address::generate(&env);
     let treasury = Address::generate(&env);
+    let base_fee = 70_000_000;
+    let metadata_fee = 30_000_000;
 
+    // First initialization succeeds
+    client.initialize(&admin, &treasury, &base_fee, &metadata_fee);
+    
+    // Verify initial state is set correctly
+    let state = client.get_state();
+    assert_eq!(state.admin, admin);
+    assert_eq!(state.treasury, treasury);
+    assert_eq!(state.base_fee, base_fee);
+    assert_eq!(state.metadata_fee, metadata_fee);
+
+    // Second initialization should panic with AlreadyInitialized error (#6)
     client.initialize(&admin, &treasury, &70_000_000, &30_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_cannot_initialize_twice_with_different_params() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, TokenFactory);
+    let client = TokenFactoryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let different_admin = Address::generate(&env);
+    let different_treasury = Address::generate(&env);
+
+    // First initialization succeeds
     client.initialize(&admin, &treasury, &70_000_000, &30_000_000);
+
+    // Attempt to initialize with different parameters should also fail
+    client.initialize(&different_admin, &different_treasury, &100_000_000, &50_000_000);
 }
 
 #[test]
