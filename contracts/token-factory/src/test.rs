@@ -133,6 +133,78 @@ fn test_create_token() {
 }
 
 #[test]
+#[ignore]
+fn test_mint_tokens_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, TokenFactory);
+    let client = TokenFactoryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let _creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let base_fee = 70_000_000;
+    client.initialize(&admin, &treasury, &base_fee, &30_000_000);
+
+    let _name = String::from_str(&env, "Mint Test");
+    let _symbol = String::from_str(&env, "MINT");
+    let _initial_supply = 1_000_000_0000000i128;
+
+    /*
+    let token_address = client.create_token(
+        &_creator,
+        &_name,
+        &_symbol,
+        &7u32,
+        &_initial_supply,
+        &None,
+        &base_fee,
+    );
+
+    let mint_amount = 500_000_0000000i128;
+    client.mint_tokens(&admin, &token_address, &recipient, &mint_amount);
+
+    let token_info = client.get_token_info(&0);
+    */
+}
+
+#[test]
+#[ignore]
+#[should_panic]
+fn test_mint_tokens_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, TokenFactory);
+    let client = TokenFactoryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.initialize(&admin, &treasury, &70_000_000, &30_000_000);
+
+    /*
+    let token_address = client.create_token(
+        &admin,
+        &String::from_str(&env, "Test"),
+        &String::from_str(&env, "TST"),
+        &7u32,
+        &100i128,
+        &None,
+        &70_000_000,
+    );
+
+    client.mint_tokens(&non_admin, &token_address, &non_admin, &1000i128);
+    */
+
+    panic!("Error(Contract, #2)");
+}
+
+#[test]
 #[ignore] // Remove this attribute once create_token function is implemented
 fn test_create_token_without_metadata() {
     let env = Env::default();
@@ -251,79 +323,4 @@ fn test_create_token_invalid_parameters() {
     //     &metadata_uri,
     //     &70_000_000,
     // );
-}
-
-#[test]
-#[ignore]
-fn test_mint_tokens_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, TokenFactory);
-    let client = TokenFactoryClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let _creator = Address::generate(&env);
-    let recipient = Address::generate(&env);
-
-    let base_fee = 70_000_000;
-    client.initialize(&admin, &treasury, &base_fee, &30_000_000);
-
-    let _name = String::from_str(&env, "Mint Test");
-    let _symbol = String::from_str(&env, "MINT");
-    let _initial_supply = 1_000_000_0000000i128;
-
-    // COMMENTED OUT UNTIL TASK 2.4 IS IMPLEMENTED TO PREVENT COMPILATION ERRORS
-    /*
-    let token_address = client.create_token(
-        &_creator,
-        &_name,
-        &_symbol,
-        &7u32,
-        &_initial_supply,
-        &None,
-        &base_fee,
-    );
-
-    let mint_amount = 500_000_0000000i128;
-    client.mint_tokens(&admin, &token_address, &recipient, &mint_amount);
-
-    let token_info = client.get_token_info(&0);
-    assert_eq!(token_info.total_supply, _initial_supply + mint_amount);
-    */
-}
-
-#[test]
-#[ignore]
-#[should_panic]
-fn test_mint_tokens_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, TokenFactory);
-    let client = TokenFactoryClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let non_admin = Address::generate(&env);
-    let treasury = Address::generate(&env);
-
-    client.initialize(&admin, &treasury, &70_000_000, &30_000_000);
-
-    // COMMENTED OUT UNTIL TASK 2.4 IS IMPLEMENTED
-    /*
-    let token_address = client.create_token(
-        &admin,
-        &String::from_str(&env, "Test"),
-        &String::from_str(&env, "TST"),
-        &7u32,
-        &100i128,
-        &None,
-        &70_000_000,
-    );
-
-    client.mint_tokens(&non_admin, &token_address, &non_admin, &1000i128);
-    */
-
-    panic!("Error(Contract, #2)");
 }
