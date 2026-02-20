@@ -8,6 +8,7 @@ import {
     isValidSupply,
     isValidStellarAddress,
 } from '../../utils/validation';
+import { getDeploymentFeeBreakdown } from '../../utils/feeCalculation';
 
 interface BasicInfoStepProps {
     onNext: (data: BasicInfoData) => void;
@@ -176,6 +177,13 @@ export function BasicInfoStep({ onNext, initialData }: BasicInfoStepProps) {
                 placeholder="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
                 required
             />
+
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                <p className="text-sm text-blue-800">
+                    <span className="font-medium">Estimated Cost:</span> {getDeploymentFeeBreakdown(false).baseFee} XLM base fee
+                    {' '}+ optional metadata (3 XLM)
+                </p>
+            </div>
 
             <Button
                 type="submit"

@@ -1,7 +1,8 @@
 export { BasicInfoStep } from './BasicInfoStep';
 export { LogoUploadStep } from './LogoUploadStep';
-export { MetadataStep } from './MetadataStep';
-export { ReviewStep } from './ReviewStep';
+export { FeeDisplay } from './FeeDisplay';
 export type { BasicInfoData } from './BasicInfoStep';
-export type { MetadataData } from './MetadataStep';
-
+export { BasicInfoStep } from "./BasicInfoStep";
+export { LogoUploadStep } from "./LogoUploadStep";
+export { TokenDeployForm } from "./TokenDeployForm";
+export type { BasicInfoData } from "./BasicInfoStep";

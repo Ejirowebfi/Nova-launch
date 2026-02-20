@@ -8,6 +8,10 @@ import {
 } from '@stellar/stellar-sdk';
 import type { TokenDeployParams, DeploymentResult, FeeBreakdown } from '../types';
 import { STELLAR_CONFIG, getNetworkConfig } from '../config/stellar';
+import { getDeploymentFeeBreakdown as calculateFeeBreakdown } from '../utils/feeCalculation';
+
+// Re-export fee calculation for convenience
+export { calculateFeeBreakdown as getDeploymentFeeBreakdown };
 
 
 export class StellarService {
