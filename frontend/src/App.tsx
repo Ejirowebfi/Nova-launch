@@ -1,6 +1,11 @@
 import { Header, Container } from "./components/Layout";
 import { Card, ErrorBoundary } from "./components/UI";
 import { ConnectButton } from "./components/WalletConnect";
+import {
+  PWAInstallButton,
+  PWAUpdateNotification,
+  PWAConnectionStatus,
+} from "./components/PWA";
 
 function App() {
   return (
@@ -10,7 +15,11 @@ function App() {
       </a>
       <div className="min-h-screen bg-gray-50">
         <Header>
-          <ConnectButton />
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
+            <PWAConnectionStatus />
+            <PWAInstallButton />
+            <ConnectButton />
+          </div>
         </Header>
         <main id="main-content">
           <Container>
@@ -22,6 +31,7 @@ function App() {
             </Card>
           </Container>
         </main>
+        <PWAUpdateNotification />
       </div>
     </ErrorBoundary>
   );
