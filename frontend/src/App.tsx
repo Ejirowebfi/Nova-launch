@@ -14,11 +14,13 @@ import {
   useTutorial,
   deploymentTutorialSteps,
 } from "./components/Tutorial";
+import { WalletInfo, NetworkToggle } from "./components/WalletConnect";
 import { useWallet } from "./hooks/useWallet";
-import { truncateAddress } from "./utils/formatting";
+import { useNetwork } from "./hooks/useNetwork";
 
 function App() {
-  const { wallet, connect, disconnect, isConnecting, error } = useWallet();
+  const { network, setNetwork } = useNetwork();
+  const { wallet, connect, disconnect, isConnecting, error } = useWallet({ network });
   const [showCelebration, setShowCelebration] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const tutorial = useTutorial(deploymentTutorialSteps);
@@ -74,25 +76,19 @@ function App() {
                 </svg>
               </Button>
             )}
+            <NetworkToggle network={network} onNetworkChange={setNetwork} />
             {wallet.connected && wallet.address ? (
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" size="sm" disabled>
-                  {truncateAddress(wallet.address)}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={disconnect}
-                  data-tutorial="connect-wallet"
-                >
-                  Disconnect
-                </Button>
-              </div>
+              <WalletInfo
+                wallet={wallet}
+                onDisconnect={disconnect}
+                data-tutorial="connect-wallet"
+              />
             ) : (
               <Button
                 size="sm"
                 onClick={() => void connect()}
                 loading={isConnecting}
+                data-tutorial="connect-wallet"
               >
                 Connect Wallet
               </Button>
