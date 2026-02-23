@@ -18,6 +18,7 @@ pub struct TokenInfo {
     pub symbol: String,
     pub decimals: u32,
     pub total_supply: i128,
+    pub total_burned: i128,
     pub metadata_uri: Option<String>,
     pub created_at: u64,
     pub total_burned: i128,    // Total amount of tokens burned

@@ -1,0 +1,45 @@
+{
+  "name": "backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "prisma generate && next build",
+    "start": "next start -p 3001",
+    "lint": "next lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@pinata/sdk": "^2.1.0",
+    "@prisma/client": "^6.19.2",
+    "@stellar/stellar-sdk": "^14.5.0",
+    "axios": "^1.13.5",
+    "next": "16.1.6",
+    "node-cache": "^5.1.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv": "^17.3.1",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "eslint-config-prettier": "^10.1.8",
+    "install": "^0.13.0",
+    "npm": "^11.10.1",
+    "pg": "^8.18.0",
+    "prettier": "^3.8.1",
+    "prisma": "^7.4.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5",
+    "vitest": "^1.5.0"
+  }
+}

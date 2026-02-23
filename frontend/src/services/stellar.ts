@@ -1,97 +1,325 @@
 import * as StellarSdk from '@stellar/stellar-sdk';
-import type { TokenInfo, TransactionDetails } from '../types';
-
-const TESTNET_HORIZON = 'https://horizon-testnet.stellar.org';
-const MAINNET_HORIZON = 'https://horizon.stellar.org';
-
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_TIME_MS = 60000;
-const MAX_BACKOFF_MS = 10000;
+import { STELLAR_CONFIG, getNetworkConfig } from '../config/stellar';
+import type { TokenInfo, TransactionDetails, AppError, BurnTokenParams, BurnResult, BurnRecord } from '../types';
+import { ErrorCode } from '../types';
 
 export class StellarService {
-  private horizonUrl: string;
+  private network: 'testnet' | 'mainnet';
+  private server: StellarSdk.SorobanRpc.Server;
+  private horizonServer: StellarSdk.Horizon.Server;
+  private networkPassphrase: string;
+  private contractClient: StellarSdk.Contract | null = null;
 
   constructor(network: 'testnet' | 'mainnet' = 'testnet') {
-    this.horizonUrl = network === 'testnet' ? TESTNET_HORIZON : MAINNET_HORIZON;
+    this.network = network;
+    const config = getNetworkConfig(network);
+    
+    this.server = new StellarSdk.SorobanRpc.Server(config.sorobanRpcUrl);
+    this.horizonServer = new StellarSdk.Horizon.Server(config.horizonUrl);
+    this.networkPassphrase = config.networkPassphrase;
+    
+    this.initializeContractClient();
+  }
+
+  private initializeContractClient(): void {
+    const contractId = STELLAR_CONFIG.factoryContractId;
+    if (!contractId) {
+      console.warn('Factory contract ID not configured');
+      return;
+    }
+
+    try {
+      this.contractClient = new StellarSdk.Contract(contractId);
+    } catch (error) {
+      throw this.createError(
+        ErrorCode.CONTRACT_ERROR,
+        'Failed to initialize contract client',
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  switchNetwork(network: 'testnet' | 'mainnet'): void {
+    if (this.network === network) return;
+
+    this.network = network;
+    const config = getNetworkConfig(network);
+    
+    this.server = new StellarSdk.SorobanRpc.Server(config.sorobanRpcUrl);
+    this.horizonServer = new StellarSdk.Horizon.Server(config.horizonUrl);
+    this.networkPassphrase = config.networkPassphrase;
+    
+    this.initializeContractClient();
+  }
+
+  getNetwork(): 'testnet' | 'mainnet' {
+    return this.network;
+  }
+
+  getContractClient(): StellarSdk.Contract {
+    if (!this.contractClient) {
+      throw this.createError(
+        ErrorCode.CONTRACT_ERROR,
+        'Contract client not initialized',
+        'Factory contract ID not configured'
+      );
+    }
+    return this.contractClient;
   }
 
   async getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
     try {
       StellarSdk.Address.fromString(tokenAddress);
     } catch {
-      throw new Error('Invalid token address');
+      throw this.createError(ErrorCode.INVALID_INPUT, 'Invalid token address');
     }
 
-    // Fetch transaction history to get deployment info
-    const txHistory = await fetch(`${this.horizonUrl}/accounts/${tokenAddress}/transactions?limit=1&order=asc`);
-    const txData = await txHistory.json();
-    const firstTx = txData._embedded?.records?.[0];
+    try {
+      const txHistory = await this.horizonServer
+        .transactions()
+        .forAccount(tokenAddress)
+        .limit(1)
+        .order('asc')
+        .call();
 
-    // For now, return basic info from Horizon
-    // In production, this would query the contract via Soroban RPC
+      const firstTx = txHistory.records[0];
+
+      return {
+        address: tokenAddress,
+        name: '',
+        symbol: '',
+        decimals: 7,
+        totalSupply: '0',
+        creator: firstTx?.source_account || '',
+        metadataUri: undefined,
+        deployedAt: firstTx ? new Date(firstTx.created_at).getTime() : Date.now(),
+        transactionHash: firstTx?.hash || '',
+      };
+    } catch (error) {
+      throw this.createError(
+        ErrorCode.NETWORK_ERROR,
+        'Failed to fetch token info',
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  async getTransaction(hash: string): Promise<TransactionDetails> {
+    try {
+      const tx = await this.horizonServer.transactions().transaction(hash).call();
+      
+      return {
+        hash,
+        status: tx.successful ? 'success' : 'failed',
+        timestamp: new Date(tx.created_at).getTime(),
+        fee: tx.fee_charged || '0',
+      };
+    } catch (error) {
+      if (error instanceof StellarSdk.NotFoundError) {
+        return {
+          hash,
+          status: 'pending',
+          timestamp: Date.now(),
+          fee: '0',
+        };
+      }
+      throw this.createError(
+        ErrorCode.NETWORK_ERROR,
+        'Failed to fetch transaction',
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  private createError(code: string, message: string, details?: string): AppError {
+    return { code, message, details };
+  }
+
+  /**
+   * Burn tokens from the caller's balance
+   * @param params - Burn parameters including token address, from address, and amount
+   * @returns Burn result with transaction hash and updated balances
+   */
+  async burnTokens(params: BurnTokenParams): Promise<BurnResult> {
+    const { tokenAddress, from, amount } = params;
+
+    try {
+      StellarSdk.Address.fromString(tokenAddress);
+      StellarSdk.Address.fromString(from);
+    } catch {
+      throw this.createError(ErrorCode.INVALID_INPUT, 'Invalid address format');
+    }
+
+    if (!amount || parseFloat(amount) <= 0) {
+      throw this.createError(ErrorCode.INVALID_AMOUNT, 'Burn amount must be greater than zero');
+    }
+
+    try {
+      const burnAmount = BigInt(Math.floor(parseFloat(amount) * 1e7));
+      const contract = this.getContractClient();
+      
+      const account = await this.server.getAccount(from);
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: StellarSdk.BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          contract.call(
+            'burn',
+            StellarSdk.nativeToScVal(tokenAddress, { type: 'address' }),
+            StellarSdk.nativeToScVal(from, { type: 'address' }),
+            StellarSdk.nativeToScVal(burnAmount, { type: 'i128' })
+          )
+        )
+        .setTimeout(180)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      const signedXdr = await this.signWithWallet(prepared.toXDR());
+      const signedTx = StellarSdk.TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase);
+      
+      const response = await this.server.sendTransaction(signedTx);
+      const result = await this.waitForTransaction(response.hash);
+      const burnResult = this.parseBurnResult(result);
+
+      return {
+        txHash: response.hash,
+        burnedAmount: amount,
+        newBalance: burnResult.newBalance,
+        newSupply: burnResult.newSupply,
+      };
+    } catch (error) {
+      throw this.handleBurnError(error);
+    }
+  }
+
+  /**
+   * Get burn history for a token
+   * @param tokenAddress - Token contract address
+   * @returns Array of burn records
+   */
+  async getBurnHistory(tokenAddress: string): Promise<BurnRecord[]> {
+    try {
+      StellarSdk.Address.fromString(tokenAddress);
+    } catch {
+      throw this.createError(ErrorCode.INVALID_INPUT, 'Invalid token address');
+    }
+
+    try {
+      const events = await this.server.getEvents({
+        startLedger: 0,
+        filters: [
+          {
+            type: 'contract',
+            contractIds: [STELLAR_CONFIG.factoryContractId],
+            topics: [['burn'], [tokenAddress]],
+          },
+        ],
+        limit: 100,
+      });
+
+      return events.events?.map((event, index) => this.parseBurnEvent(event, index)) || [];
+    } catch (error) {
+      throw this.createError(
+        ErrorCode.NETWORK_ERROR,
+        'Failed to fetch burn history',
+        error instanceof Error ? error.message : undefined
+      );
+    }
+  }
+
+  private parseBurnResult(txResult: any): { newBalance: string; newSupply: string } {
+    try {
+      const returnValue = txResult.returnValue;
+      if (returnValue) {
+        return {
+          newBalance: '0',
+          newSupply: '0',
+        };
+      }
+      return { newBalance: '0', newSupply: '0' };
+    } catch {
+      return { newBalance: '0', newSupply: '0' };
+    }
+  }
+
+  private parseBurnEvent(event: any, index: number): BurnRecord {
+    const timestamp = event.ledgerClosedAt ? new Date(event.ledgerClosedAt).getTime() : Date.now();
+    
     return {
-      address: tokenAddress,
-      name: '', // Would be fetched from contract
-      symbol: '', // Would be fetched from contract
-      decimals: 7, // Would be fetched from contract
-      totalSupply: '0', // Would be fetched from contract
-      creator: firstTx?.source_account || '',
-      metadataUri: undefined,
-      deployedAt: firstTx ? new Date(firstTx.created_at).getTime() : Date.now(),
-      transactionHash: firstTx?.hash || '',
+      id: `${event.id || index}`,
+      timestamp,
+      from: '',
+      amount: '0',
+      isAdminBurn: false,
+      txHash: event.txHash || '',
+      blockNumber: event.ledger,
     };
   }
 
-  async monitorTransaction(
-    hash: string,
-    onProgress?: (status: TransactionDetails) => void
-  ): Promise<TransactionDetails> {
-    const startTime = Date.now();
-    let backoff = POLL_INTERVAL_MS;
+  private handleBurnError(error: any): AppError {
+    const errorMsg = error instanceof Error ? error.message : String(error);
 
-    while (Date.now() - startTime < MAX_POLL_TIME_MS) {
-      try {
-        const response = await fetch(`${this.horizonUrl}/transactions/${hash}`);
-        
-        if (response.ok) {
-          const tx = await response.json();
-          const result: TransactionDetails = {
-            hash,
-            status: tx.successful ? 'success' : 'failed',
-            timestamp: new Date(tx.created_at).getTime(),
-            fee: tx.fee_charged || '0',
-          };
-          onProgress?.(result);
-          return result;
-        }
-
-        if (response.status === 404) {
-          const pending: TransactionDetails = {
-            hash,
-            status: 'pending',
-            timestamp: Date.now(),
-            fee: '0',
-          };
-          onProgress?.(pending);
-          await this.sleep(backoff);
-          backoff = Math.min(backoff * 1.5, MAX_BACKOFF_MS);
-          continue;
-        }
-
-        throw new Error(`HTTP ${response.status}`);
-      } catch {
-        if (Date.now() - startTime >= MAX_POLL_TIME_MS) {
-          throw new Error('Transaction monitoring timeout');
-        }
-        await this.sleep(backoff);
-        backoff = Math.min(backoff * 1.5, MAX_BACKOFF_MS);
-      }
+    if (errorMsg.includes('BurnAmountExceedsBalance')) {
+      return this.createError(ErrorCode.INSUFFICIENT_BALANCE, 'Insufficient balance to burn');
     }
 
-    throw new Error('Transaction monitoring timeout');
+    if (errorMsg.includes('InvalidBurnAmount')) {
+      return this.createError(ErrorCode.INVALID_AMOUNT, 'Invalid burn amount');
+    }
+
+    if (errorMsg.includes('Unauthorized')) {
+      return this.createError(ErrorCode.UNAUTHORIZED, 'Not authorized to burn tokens');
+    }
+
+    if (errorMsg.includes('rejected')) {
+      return this.createError(ErrorCode.WALLET_REJECTED, 'Transaction rejected by wallet');
+    }
+
+    return this.createError(ErrorCode.BURN_FAILED, 'Failed to burn tokens', errorMsg);
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  private async waitForTransaction(hash: string, timeout = 30000): Promise<any> {
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < timeout) {
+      try {
+        const tx = await this.server.getTransaction(hash);
+        if (tx.status === 'SUCCESS') {
+          return tx;
+        }
+        if (tx.status === 'FAILED') {
+          throw new Error('Transaction failed');
+        }
+      } catch (error) {
+        if (error instanceof Error && !error.message.includes('not found')) {
+          throw error;
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    throw this.createError(ErrorCode.TIMEOUT_ERROR, 'Transaction confirmation timeout');
+  }
+
+  private async signWithWallet(xdr: string): Promise<string> {
+    if (typeof window === 'undefined' || !(window as any).freighter) {
+      throw this.createError(ErrorCode.WALLET_NOT_CONNECTED, 'Freighter wallet not found');
+    }
+
+    try {
+      const { signTransaction } = (window as any).freighter;
+      const result = await signTransaction(xdr, {
+        network: this.network,
+        networkPassphrase: this.networkPassphrase,
+      });
+      return result.signedTxXdr || result;
+    } catch (error) {
+      throw this.createError(
+        ErrorCode.WALLET_REJECTED,
+        'Transaction signing failed',
+        error instanceof Error ? error.message : undefined
+      );
+    }
   }
 }

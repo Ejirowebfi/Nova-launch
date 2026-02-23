@@ -53,6 +53,16 @@ pub fn get_token_info(env: &Env, index: u32) -> Option<TokenInfo> {
     env.storage().instance().get(&DataKey::Token(index))
 }
 
+pub fn set_token_info(env: &Env, index: u32, info: &TokenInfo) {
+    env.storage().instance().set(&DataKey::Token(index), info);
+}
+
+pub fn increment_token_count(env: &Env) -> u32 {
+    let count = get_token_count(env) + 1;
+    env.storage().instance().set(&DataKey::TokenCount, &count);
+    count
+}
+
 // Get factory state
 pub fn get_factory_state(env: &Env) -> FactoryState {
     FactoryState {
@@ -60,5 +70,20 @@ pub fn get_factory_state(env: &Env) -> FactoryState {
         treasury: get_treasury(env),
         base_fee: get_base_fee(env),
         metadata_fee: get_metadata_fee(env),
+    }
+}
+
+// Update token supply
+pub fn update_token_supply(env: &Env, token_address: &Address, amount_delta: i128) {
+    // Find the token in storage and update its supply
+    let token_count = get_token_count(env);
+    for i in 0..token_count {
+        if let Some(mut token_info) = get_token_info(env, i) {
+            if token_info.address == *token_address {
+                token_info.total_supply += amount_delta;
+                set_token_info(env, i, &token_info);
+                break;
+            }
+        }
     }
 }
