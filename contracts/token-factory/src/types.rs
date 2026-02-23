@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, contracterror, Address, String};
+use soroban_sdk::{contracterror, contracttype, Address, String};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,8 +18,14 @@ pub struct TokenInfo {
     pub symbol: String,
     pub decimals: u32,
     pub total_supply: i128,
+    pub total_burned: i128,
     pub metadata_uri: Option<String>,
     pub created_at: u64,
+    pub total_burned: i128,        // Total amount of tokens burned
+    pub burn_count: u32,            // Number of burn operations
+    pub clawback_enabled: bool,     // Whether admin can burn from any address
+    pub total_burned: i128,    // Total amount of tokens burned
+    pub burn_count: u32,        // Number of burn operations
 }
 
 #[contracttype]
@@ -30,7 +36,8 @@ pub enum DataKey {
     BaseFee,
     MetadataFee,
     TokenCount,
-    Token(u32), // Token index -> TokenInfo
+    Token(u32),              // Token index -> TokenInfo
+    TokenByAddress(Address), // Token address -> TokenInfo (for quick lookup)
 }
 
 #[contracterror]
@@ -42,6 +49,9 @@ pub enum Error {
     TokenNotFound = 4,
     MetadataAlreadySet = 5,
     AlreadyInitialized = 6,
-    InvalidBurnAmount = 7,
-    BurnAmountExceedsBalance = 8,
+    InsufficientBalance = 7,
+    InvalidAmount = 8,
+    ClawbackDisabled = 9,
+    InvalidBurnAmount = 10,
+    BurnAmountExceedsBalance = 11,
 }

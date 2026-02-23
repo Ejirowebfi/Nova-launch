@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { Button } from "../UI";
+import { LoadingButton } from "../UI";
 import { useToast } from "../../hooks/useToast";
 
 interface ConnectButtonProps {
@@ -124,18 +124,17 @@ export function ConnectButton({
           </Button>
         </div>
       ) : (
-        <Button
+        <LoadingButton
           onClick={handleConnect}
           loading={isLoading}
-          disabled={isLoading || !!error}
+          loadingText="Connecting..."
+          disabled={!!error}
           size="md"
-          className={isLoading ? "sm:px-6" : ""}
-          aria-label="Connect Wallet"
-          aria-busy={isLoading}
+          aria-label={isLoading ? "Connecting..." : "Connect Wallet"}
           aria-describedby={error ? "wallet-error" : undefined}
         >
-          {isLoading ? "Connecting..." : "Connect Wallet"}
-        </Button>
+          Connect Wallet
+        </LoadingButton>
       )}
 
       {error && (
