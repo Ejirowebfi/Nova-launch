@@ -7,6 +7,7 @@ pub struct FactoryState {
     pub treasury: Address,
     pub base_fee: i128,
     pub metadata_fee: i128,
+    pub paused: bool,
 }
 
 #[contracttype]
@@ -35,6 +36,7 @@ pub enum DataKey {
     TokenCount,
     Token(u32),
     TokenByAddress(Address),
+    Paused,
 }
 
 #[contracterror]
@@ -51,4 +53,5 @@ pub enum Error {
     ClawbackDisabled = 9,
     InvalidBurnAmount = 10,
     BurnAmountExceedsBalance = 11,
+    ContractPaused = 12,
 }

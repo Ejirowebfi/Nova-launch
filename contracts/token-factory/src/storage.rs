@@ -70,7 +70,20 @@ pub fn get_factory_state(env: &Env) -> FactoryState {
         treasury: get_treasury(env),
         base_fee: get_base_fee(env),
         metadata_fee: get_metadata_fee(env),
+        paused: is_paused(env),
     }
+}
+
+// Pause management
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
 // Token lookup by address

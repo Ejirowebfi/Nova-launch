@@ -88,6 +88,58 @@ impl TokenFactory {
         Ok(())
     }
 
+    /// Pause the contract (admin only)
+    ///
+    /// Halts critical operations like token creation and metadata updates.
+    /// Admin functions like fee updates remain operational.
+    ///
+    /// Implements #225
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+
+        let current_admin = storage::get_admin(&env);
+        if admin != current_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        storage::set_paused(&env, true);
+
+        env.events().publish(
+            (symbol_short!("pause"),),
+            (admin, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Unpause the contract (admin only)
+    ///
+    /// Resumes normal operations after a pause.
+    ///
+    /// Implements #225
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+
+        let current_admin = storage::get_admin(&env);
+        if admin != current_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        storage::set_paused(&env, false);
+
+        env.events().publish(
+            (symbol_short!("unpause"),),
+            (admin, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Check if contract is paused
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
+    }
+
     /// Update fee structure (admin only)
     pub fn update_fees(
         env: Env,
@@ -155,6 +207,11 @@ impl TokenFactory {
         from: Address,
         amount: i128,
     ) -> Result<(), Error> {
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+
         // Require admin authorization
         admin.require_auth();
 
@@ -218,6 +275,11 @@ impl TokenFactory {
         admin: Address,
         enabled: bool,
     ) -> Result<(), Error> {
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+
         // Require admin authorization
         admin.require_auth();
 
@@ -254,6 +316,9 @@ impl TokenFactory {
 
 #[cfg(test)]
 mod admin_transfer_test;
+
+#[cfg(test)]
+mod pause_test;
 
 // Temporarily disabled due to compilation issues
 // #[cfg(test)]

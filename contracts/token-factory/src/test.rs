@@ -66,6 +66,32 @@ fn test_initialize_with_various_fees() {
 }
 
 #[test]
+fn test_admin_transfer_integration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, TokenFactory);
+    let client = TokenFactoryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    // Initialize
+    client.initialize(&admin, &treasury, &100_0000000, &50_0000000);
+
+    // Transfer admin
+    client.transfer_admin(&admin, &new_admin);
+
+    // Verify new admin can perform admin operations
+    client.update_fees(&new_admin, &Some(200_0000000), &None);
+    
+    let state = client.get_state();
+    assert_eq!(state.admin, new_admin);
+    assert_eq!(state.base_fee, 200_0000000);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #6)")]
 fn test_cannot_initialize_twice() {
     let env = Env::default();
