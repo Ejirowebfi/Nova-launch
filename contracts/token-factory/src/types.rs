@@ -54,6 +54,8 @@ pub struct ContractMetadata {
 /// * `symbol` - Token symbol (e.g., "MTK")
 /// * `decimals` - Number of decimal places (typically 7 for Stellar)
 /// * `total_supply` - Current circulating supply after burns
+/// * `initial_supply` - Initial supply at token creation
+/// * `max_supply` - Optional maximum supply cap (None = unlimited)
 /// * `metadata_uri` - Optional IPFS URI for additional metadata
 /// * `created_at` - Unix timestamp of token creation
 /// * `total_burned` - Cumulative amount of tokens burned
@@ -75,12 +77,11 @@ pub struct TokenInfo {
     pub decimals: u32,
     pub total_supply: i128,
     pub initial_supply: i128,
+    pub max_supply: Option<i128>,
     pub total_burned: i128,
     pub burn_count: u32,
     pub metadata_uri: Option<String>,
     pub created_at: u64,
-    pub total_burned: i128,
-    pub burn_count: u32,
     pub clawback_enabled: bool,
 }
 
@@ -171,6 +172,8 @@ pub enum DataKey {
 /// * `ContractPaused` - Operation not allowed while paused
 /// * `TimelockNotExpired` - Timelock period has not elapsed
 /// * `ChangeAlreadyExecuted` - Change has already been executed
+/// * `MaxSupplyExceeded` - Minting would exceed max supply cap
+/// * `InvalidMaxSupply` - Max supply is less than initial supply
 ///
 /// # Examples
 /// ```
@@ -197,6 +200,8 @@ pub enum Error {
     ContractPaused = 14,
     TimelockNotExpired = 15,
     ChangeAlreadyExecuted = 16,
+    MaxSupplyExceeded = 17,
+    InvalidMaxSupply = 18,
 }
 
 /// Timelock configuration

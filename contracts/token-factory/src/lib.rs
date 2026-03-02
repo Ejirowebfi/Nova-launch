@@ -7,6 +7,7 @@ mod types;
 mod validation;
 mod timelock;
 mod pagination;
+mod mint;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String};
 use types::{ContractMetadata, Error, FactoryState, TokenInfo};
@@ -930,6 +931,95 @@ impl TokenFactory {
     /// ```
     pub fn get_creator_token_count(env: Env, creator: Address) -> u32 {
         pagination::get_creator_token_count(&env, &creator)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Minting Functions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Mint tokens to an address
+    ///
+    /// Increases the total supply and the recipient's balance.
+    /// Enforces max supply constraints if set for the token.
+    /// Only the token creator can mint new tokens.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `creator` - Token creator address (must authorize)
+    /// * `token_index` - Index of the token to mint
+    /// * `to` - Address to receive the minted tokens
+    /// * `amount` - Amount to mint (must be > 0)
+    ///
+    /// # Returns
+    /// Returns `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the token creator
+    /// * `Error::TokenNotFound` - Token doesn't exist
+    /// * `Error::InvalidAmount` - Amount is zero or negative
+    /// * `Error::MaxSupplyExceeded` - Would exceed max supply cap
+    /// * `Error::ArithmeticError` - Overflow in calculation
+    /// * `Error::ContractPaused` - Contract is paused
+    ///
+    /// # Examples
+    /// ```
+    /// // Mint 1000 tokens
+    /// factory.mint(&env, creator, 0, recipient, 1_000_0000000)?;
+    ///
+    /// // Check remaining mintable
+    /// if let Some(remaining) = factory.get_remaining_mintable(&env, 0) {
+    ///     log!("Can mint {} more tokens", remaining);
+    /// }
+    /// ```
+    pub fn mint(
+        env: Env,
+        creator: Address,
+        token_index: u32,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        // Check if contract is paused
+        if storage::is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+        
+        creator.require_auth();
+        
+        // Verify creator owns the token
+        let token_info = storage::get_token_info(&env, token_index)
+            .ok_or(Error::TokenNotFound)?;
+        
+        if token_info.creator != creator {
+            return Err(Error::Unauthorized);
+        }
+        
+        // Perform mint with max supply validation
+        mint::mint(&env, token_index, &to, amount)
+    }
+
+    /// Get remaining mintable supply for a token
+    ///
+    /// Returns how many more tokens can be minted before hitting the max supply.
+    /// Returns None if there's no max supply (unlimited minting).
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `token_index` - Index of the token
+    ///
+    /// # Returns
+    /// * `Some(amount)` - Remaining mintable amount
+    /// * `None` - Unlimited minting (no max supply set)
+    ///
+    /// # Examples
+    /// ```
+    /// match factory.get_remaining_mintable(&env, 0) {
+    ///     Some(0) => log!("Max supply reached"),
+    ///     Some(amount) => log!("Can mint {} more", amount),
+    ///     None => log!("Unlimited minting"),
+    /// }
+    /// ```
+    pub fn get_remaining_mintable(env: Env, token_index: u32) -> Option<i128> {
+        mint::get_remaining_mintable(&env, token_index)
     }
 
 }

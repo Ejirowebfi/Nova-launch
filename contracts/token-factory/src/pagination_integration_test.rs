@@ -42,6 +42,7 @@ fn create_token(
         decimals: 7,
         total_supply: 1_000_000_0000000,
         initial_supply: 1_000_000_0000000,
+        max_supply: None,
         total_burned: 0,
         burn_count: 0,
         metadata_uri: None,

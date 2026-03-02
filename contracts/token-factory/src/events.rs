@@ -160,3 +160,14 @@ pub fn emit_treasury_updated(env: &Env, new_treasury: &Address) {
         (new_treasury,),
     );
 }
+
+
+/// Emit mint event
+///
+/// Emitted when tokens are minted
+pub fn emit_mint(env: &Env, token_index: u32, to: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("mint"), token_index),
+        (to, amount),
+    );
+}
