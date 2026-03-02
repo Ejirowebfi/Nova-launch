@@ -572,3 +572,17 @@ pub fn increment_burn_count(env: &Env, token_index: u32) {
 
 // ── Burn feature additions ─────────────────────────────────
 
+// ── Token-level pause ─────────────────────────────────────
+
+pub fn is_token_paused(env: &Env, token_index: u32) -> bool {
+    env.storage()
+        .instance()
+        .get(&crate::types::DataKey::TokenPaused(token_index))
+        .unwrap_or(false)
+}
+
+pub fn set_token_paused(env: &Env, token_index: u32, paused: bool) {
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::TokenPaused(token_index), &paused);
+}

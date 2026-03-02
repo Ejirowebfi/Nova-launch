@@ -22,6 +22,7 @@ pub struct TokenInfo {
     pub total_supply: i128,
     pub metadata_uri: Option<String>,
     pub created_at: u64,
+    pub is_paused: bool,   // NEW — token-level pause flag
 }
 
 #[contracttype]
@@ -32,24 +33,23 @@ pub enum DataKey {
     BaseFee,
     MetadataFee,
     TokenCount,
-    Token(u32),            // Token index -> TokenInfo  (existing)
-    Balance(u32, Address), // (token_index, holder)     -> i128   (NEW — burn)
-    BurnCount(u32),        // token_index               -> u32    (NEW — burn)
+    Token(u32),
+    Balance(u32, Address),
+    BurnCount(u32),
+    TokenPaused(u32),      // NEW — token_index -> bool
 }
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    // ── pre-existing ──────────────────────────────────────
     InsufficientFee     = 1,
     Unauthorized        = 2,
     InvalidParameters   = 3,
     TokenNotFound       = 4,
     MetadataAlreadySet  = 5,
     AlreadyInitialized  = 6,
-
-    // ── burn feature ──────────────────────────────────────
-    InsufficientBalance = 7, // holder balance < requested burn amount
-    ArithmeticError     = 8, // checked_sub / checked_add returned None
-    BatchTooLarge       = 9, // batch_burn entry count > MAX_BATCH_BURN
+    InsufficientBalance = 7,
+    ArithmeticError     = 8,
+    BatchTooLarge       = 9,
+    TokenPaused         = 10,  // NEW
 }

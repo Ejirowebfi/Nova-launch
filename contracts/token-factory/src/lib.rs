@@ -81,10 +81,11 @@ impl TokenFactory {
     }
 
     /// Get token info by index
-    pub fn get_token_info(env: Env, index: u32) -> Result<TokenInfo, Error> {
-        storage::get_token_info(&env, index).ok_or(Error::TokenNotFound)
-    }
-
+   pub fn get_token_info(env: Env, index: u32) -> Result<TokenInfo, Error> {
+    let mut info = storage::get_token_info(&env, index).ok_or(Error::TokenNotFound)?;
+    info.is_paused = storage::is_token_paused(&env, index);   // ADD
+    Ok(info)
+}
     /// Create a new token (Simulated for registry)
     pub fn create_token(
         env: Env,
@@ -123,6 +124,7 @@ impl TokenFactory {
             total_supply: initial_supply,
             metadata_uri,
             created_at: env.ledger().timestamp(),
+            is_paused: false, 
         };
 
         let index = storage::get_token_count(&env);
@@ -133,22 +135,20 @@ impl TokenFactory {
     }
 
     /// Update metadata for a token (must not be set already)
-    pub fn set_metadata(
-        env: Env,
-        index: u32,
-        new_metadata_uri: soroban_sdk::String,
-    ) -> Result<(), Error> {
-        let mut info = storage::get_token_info(&env, index).ok_or(Error::TokenNotFound)?;
+   pub fn set_metadata(env: Env, index: u32, new_metadata_uri: soroban_sdk::String) -> Result<(), Error> {
+    let mut info = storage::get_token_info(&env, index).ok_or(Error::TokenNotFound)?;
 
-        if info.metadata_uri.is_some() {
-            return Err(Error::MetadataAlreadySet);
-        }
+    if storage::is_token_paused(&env, index) {   // ADD
+        return Err(Error::TokenPaused);          // ADD
+    }                                            // ADD
 
-        info.metadata_uri = Some(new_metadata_uri);
-        storage::set_token_info(&env, index, &info);
-
-        Ok(())
+    if info.metadata_uri.is_some() {
+        return Err(Error::MetadataAlreadySet);
     }
+    info.metadata_uri = Some(new_metadata_uri);
+    storage::set_token_info(&env, index, &info);
+    Ok(())
+}
 
     pub fn burn(env: Env, caller: Address, token_index: u32, amount: i128) -> Result<(), Error> {
         burn::burn(&env, caller, token_index, amount)
@@ -164,6 +164,30 @@ impl TokenFactory {
 
     pub fn get_burn_count(env: Env, token_index: u32) -> u32 {
         burn::get_burn_count(&env, token_index)
+    }
+
+    pub fn pause_token(env: Env, admin: Address, token_index: u32) -> Result<(), Error> {
+        admin.require_auth();
+        if admin != storage::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        storage::get_token_info(&env, token_index).ok_or(Error::TokenNotFound)?;
+        storage::set_token_paused(&env, token_index, true);
+        Ok(())
+    }
+
+    pub fn unpause_token(env: Env, admin: Address, token_index: u32) -> Result<(), Error> {
+        admin.require_auth();
+        if admin != storage::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        storage::get_token_info(&env, token_index).ok_or(Error::TokenNotFound)?;
+        storage::set_token_paused(&env, token_index, false);
+        Ok(())
+    }
+
+    pub fn is_token_paused(env: Env, token_index: u32) -> bool {
+        storage::is_token_paused(&env, token_index)
     }
 
 }
@@ -194,4 +218,7 @@ mod metadata_immutability_test;
 
 #[cfg(test)]
 mod token_registry_test;
+
+#[cfg(test)]
+mod token_pause_test;
 
