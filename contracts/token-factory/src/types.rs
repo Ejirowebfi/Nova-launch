@@ -101,6 +101,7 @@ pub struct TokenStats {
     pub total_burned: i128,
     pub burn_count: u32,
     pub clawback_enabled: bool,
+    pub freeze_enabled: bool,
 }
 
 /// Batch fee update structure for Phase 2 optimization

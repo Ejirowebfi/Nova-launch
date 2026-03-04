@@ -1,5 +1,7 @@
 #![no_std]
 
+mod freeze_functions;
+
 mod events;
 mod event_versions;
 mod storage;
