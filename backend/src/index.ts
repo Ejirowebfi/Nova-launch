@@ -7,13 +7,19 @@ import { corsOptions } from "./config/cors";
 import adminRoutes from "./routes/admin";
 import leaderboardRoutes from "./routes/leaderboard";
 import tokenRoutes from "./routes/tokens";
+import statsRoutes from "./routes/stats";
+import governanceRoutes from "./routes/governance";
 import { Database } from "./config/database";
 import { successResponse, errorResponse } from "./utils/response";
+import { requestLoggingMiddleware } from "./middleware/request-logging.middleware";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Request logging middleware (first to capture all requests)
+app.use(requestLoggingMiddleware);
 
 // Security middleware
 app.use(helmet());
@@ -29,6 +35,8 @@ const limiter = rateLimit({
 app.use("/api/admin", limiter);
 app.use("/api/leaderboard", limiter);
 app.use("/api/tokens", limiter);
+app.use("/api/stats", limiter);
+app.use("/api/governance", limiter);
 
 // Body parsing middleware
 app.use(express.json());
@@ -41,6 +49,8 @@ Database.initialize();
 app.use("/api/admin", adminRoutes);
 app.use("/api/leaderboard", leaderboardRoutes);
 app.use("/api/tokens", tokenRoutes);
+app.use("/api/stats", statsRoutes);
+app.use("/api/governance", governanceRoutes);
 
 // Health check
 app.get("/health", (req, res) => {
@@ -65,7 +75,10 @@ app.use(
       errorResponse({
         code: "INTERNAL_SERVER_ERROR",
         message: err.message || "Internal server error",
-        details: process.env.NODE_ENV === "development" ? { stack: err.stack } : undefined,
+        details:
+          process.env.NODE_ENV === "development"
+            ? { stack: err.stack }
+            : undefined,
       })
     );
   }
