@@ -4,8 +4,10 @@ mod storage;
 mod burn;
 mod types;
 
+use types::{Error, FactoryState, TokenInfo, TokenStats, StreamPage};
 use soroban_sdk::{contract, contractimpl, Address, Env};
-use types::{Error, FactoryState, TokenInfo, TokenStats};
+
+
 
 
 #[contract]
@@ -131,6 +133,7 @@ impl TokenFactory {
         let index = storage::get_token_count(&env);
         storage::set_token_info(&env, index, &info);
         storage::increment_token_count(&env);
+        storage::add_stream_to_beneficiary(&env, &info.creator, index);
 
         Ok(token_address)
     }
@@ -205,6 +208,36 @@ impl TokenFactory {
             has_clawback:   false,
         })
     }
+
+    /// Return a paginated list of token indices where beneficiary is the creator.
+    /// cursor: starting entry index (0 for first page)
+    /// limit: max entries to return (capped at 50)
+    pub fn get_streams_by_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> StreamPage {
+        let limit = limit.min(50);
+        let total = storage::get_beneficiary_stream_count(&env, &beneficiary);
+
+        let mut token_indices = soroban_sdk::Vec::new(&env);
+        let mut i = cursor;
+
+        while i < total && (i - cursor) < limit {
+            if let Some(token_index) = storage::get_beneficiary_stream_entry(&env, &beneficiary, i) {
+                token_indices.push_back(token_index);
+            }
+            i += 1;
+        }
+
+        let next_cursor = if i < total { Some(i) } else { None };
+
+        StreamPage {
+            token_indices,
+            next_cursor,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -241,3 +274,11 @@ mod token_pause_test;
 #[cfg(test)]
 mod token_stats_test;
 
+#[cfg(test)]
+mod beneficiary_streams_test;
+
+#[cfg(test)]
+mod invariants;
+
+#[cfg(test)]
+mod invariant_tests;
