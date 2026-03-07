@@ -269,53 +269,38 @@ pub enum Error {
     MetadataAlreadySet  = 5,
     AlreadyInitialized  = 6,
     InsufficientBalance = 7,
-    ArithmeticError     = 8,
-    BatchTooLarge       = 9,
-    TokenPaused         = 10,
-    InvalidAmount = 11,
-    ClawbackDisabled = 12,
-    InvalidBurnAmount = 13,
-    BurnAmountExceedsBalance = 14,
-    ContractPaused = 15,
-    InvalidTokenParams = 16,
-    BatchCreationFailed = 17,
-    TimelockNotExpired = 18,
-    ChangeAlreadyExecuted = 19,
-    MaxSupplyExceeded = 20,
-    InvalidMaxSupply = 21,
-    WithdrawalCapExceeded = 22,
-    RecipientNotAllowed = 23,
-    MissingAdmin = 24,
-    MissingTreasury = 25,
-    InvalidBaseFee = 26,
-    InvalidMetadataFee = 27,
-    InconsistentTokenCount = 28,
-    StreamNotFound = 29,
-    StreamCancelled = 30,
-    NothingToClaim = 31,
-    InvalidTimeWindow = 32,
-    PayloadTooLarge = 33,
-    ProposalNotFound = 34,
-    VotingNotStarted = 35,
-    VotingEnded = 36,
-    AlreadyVoted = 37,
-    VotingClosed = 38,
-    ProposalExpired = 39,
-    ProposalNotExecutable = 40,
-    QuorumNotMet = 41,
-    AlreadyExecuted = 42,
-    CliffNotReached = 32,
-    InvalidSchedule = 33,
-    ProposalNotFound = 34,
-    VotingNotStarted = 35,
-    VotingEnded = 36,
-    AlreadyVoted = 37,
-    PayloadTooLarge = 38,
-    InvalidTimeWindow = 39,
-    FreezeNotEnabled = 40,
-    AddressFrozen = 41,
-    AddressNotFrozen = 42,
-    StreamPaused = 43,
+    ArithmeticError = 8,
+    BatchTooLarge = 9,
+    InvalidAmount = 10,
+    ClawbackDisabled = 11,
+    InvalidBurnAmount = 12,
+    BurnAmountExceedsBalance = 13,
+    ContractPaused = 14,
+    TimelockNotExpired = 15,
+    ChangeAlreadyExecuted = 16,
+    MaxSupplyExceeded = 17,
+    InvalidMaxSupply = 18,
+    WithdrawalCapExceeded = 19,
+    RecipientNotAllowed = 20,
+    MissingAdmin = 21,
+    MissingTreasury = 22,
+    InvalidBaseFee = 23,
+    InvalidMetadataFee = 24,
+    InconsistentTokenCount = 25,
+}
+
+/// Timelock configuration
+///
+/// Defines the delay period for sensitive operations.
+///
+/// # Fields
+/// * `delay_seconds` - Time delay in seconds before changes can be executed
+/// * `enabled` - Whether timelock is currently active
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockConfig {
+    pub delay_seconds: u64,
+    pub enabled: bool,
 }
 
 /// Type of pending change
@@ -480,7 +465,8 @@ pub struct PaginationCursor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaginatedTokens {
     pub tokens: soroban_sdk::Vec<TokenInfo>,
-    pub cursor: Option<u32>,
+    pub has_more: bool,
+    pub cursor: PaginationCursor,
 }
 
 /// Treasury withdrawal policy
