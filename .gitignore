@@ -9,6 +9,7 @@ target/
 # Build outputs
 dist/
 build/
+.next/
 *.wasm
 
 # IDE
@@ -29,8 +30,27 @@ npm-debug.log*
 *.md
 !README.md
 
-# Documentation (excluding README.md, design.md, and TESTING.md)
+# Documentation (excluding specific files)
 *.md
 !README.md
 !.nova/specs/stellar-token-deployer/design.md
 !contracts/token-factory/TESTING.md
+!DEPLOYMENT_GUIDE.md
+!DEPLOYMENT_CHECKLIST.md
+!CONFLICT_AND_CI_REPORT.md
+!GLOBAL_ERROR_HANDLING.md
+!docs/user-guides/*.md
+!ACCESSIBILITY_TESTING_GUIDE.md
+!TEST_ARTIFACTS_GUIDE.md
+!TEST_ARTIFACTS_QUICK_REF.md
+!TEST_ARTIFACTS_IMPLEMENTATION.md
+!TEST_ARTIFACTS_CHECKLIST.md
+!TEST_ARTIFACTS_GUIDE.md
+!TEST_ARTIFACTS_QUICK_REF.md
+
+# Deployment artifacts (generated during deployment)
+deployment-testnet.json
+deployment-mainnet.json
+
+# Test artifacts (generated during test failures)
+test-artifacts/
