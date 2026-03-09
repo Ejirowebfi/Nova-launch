@@ -177,7 +177,7 @@ fn test_execute_buyback_step_slippage_protection() {
         &dex,
     );
 
-    assert_eq!(result, Err(Ok(Error::InvalidParameters)));
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
 #[test]

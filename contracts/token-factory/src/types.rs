@@ -326,6 +326,13 @@ pub enum Error {
     QuorumNotMet = 50,
 }
 
+// Buyback error code mapping (reusing existing errors):
+// - CampaignNotFound -> TokenNotFound (4)
+// - CampaignInactive -> ContractPaused (14)  
+// - BudgetExhausted -> InsufficientFee (1)
+// - SlippageExceeded -> InvalidAmount (10)
+// - InvalidBuybackParams -> InvalidParameters (3)
+
 /// Type of pending change
 ///
 /// Identifies which operation is being timelocked.

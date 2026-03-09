@@ -16,6 +16,13 @@ use crate::events;
 ///
 /// # Returns
 /// Amount of tokens bought and burned
+///
+/// # Errors
+/// * `Error::TokenNotFound` - Campaign does not exist
+/// * `Error::ContractPaused` - Campaign is not active
+/// * `Error::InsufficientFee` - No remaining budget
+/// * `Error::InvalidParameters` - Invalid spend amount
+/// * `Error::InvalidAmount` - Slippage exceeded
 pub fn execute_buyback_step(
     env: &Env,
     campaign_id: u32,
@@ -27,11 +34,12 @@ pub fn execute_buyback_step(
     executor.require_auth();
 
     // Load campaign state
-    let mut campaign = storage::get_buyback_campaign(env, campaign_id)?;
+    let mut campaign = storage::get_buyback_campaign(env, campaign_id)
+        .map_err(|_| Error::TokenNotFound)?;
 
     // Validate campaign is active
     if !campaign.active {
-        return Err(Error::InvalidParameters);
+        return Err(Error::ContractPaused);
     }
 
     // Check remaining budget
@@ -51,7 +59,7 @@ pub fn execute_buyback_step(
 
     // Enforce slippage tolerance
     if tokens_bought < min_tokens_out {
-        return Err(Error::InvalidParameters);
+        return Err(Error::InvalidAmount);
     }
 
     // Burn the bought tokens
@@ -89,7 +97,7 @@ fn simulate_swap(
     let tokens_out = spend_amount * 100;
     
     if tokens_out < min_out {
-        return Err(Error::InvalidParameters);
+        return Err(Error::InvalidAmount);
     }
     
     Ok(tokens_out)

@@ -7,6 +7,8 @@ mod burn;
 mod buyback;
 #[cfg(test)]
 mod buyback_test;
+#[cfg(test)]
+mod buyback_error_stability_test;
 mod differential_engine;
 mod event_versions;
 mod events;
