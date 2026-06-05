@@ -18,6 +18,8 @@
     "test:security:dos": "vitest run src/__tests__/security.dos.test.ts",
     "test:security:coverage": "vitest run --coverage src/__tests__/security",
     "test:security:scanning": "vitest run src/__tests__/security.dependency-scanning.test.ts",
+    "test:pinata-queue": "vitest run src/__tests__/pinataQueue.test.ts --reporter=verbose",
+    "test:txn-propagation": "vitest run src/__tests__/txn-id-propagation.test.ts src/__tests__/correlation-id-propagation.test.ts --reporter=verbose",
     "test:mutation": "vitest run src/__tests__/mutation-testing.framework.test.ts",
     "lint": "eslint src --ext .ts,.tsx",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json}\"",
