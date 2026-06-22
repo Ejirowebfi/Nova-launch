@@ -532,3 +532,76 @@ export function getStellarExpertUrl(txHash: string, network: 'testnet' | 'mainne
     : 'https://stellar.expert/explorer/testnet/tx';
   return `${baseUrl}/${txHash}`;
 }
+
+// ─── Vesting claim flow ────────────────────────────────────────────────────────
+
+import {
+  Contract,
+  TransactionBuilder,
+  BASE_FEE,
+  nativeToScVal,
+  rpc as Soroban,
+  Transaction,
+} from '@stellar/stellar-sdk';
+import { getNetworkConfig, STELLAR_CONFIG } from '../config/stellar';
+import { WalletService } from '../services/wallet';
+
+export interface ClaimVaultResult {
+  txHash: string;
+}
+
+/**
+ * Submit a claim_stream transaction for the given streamId.
+ * Throws if the wallet is not connected, simulation fails, or the tx is rejected.
+ */
+export async function claimVault(
+  streamId: number,
+  claimerAddress: string,
+  network: 'testnet' | 'mainnet' = 'testnet',
+): Promise<ClaimVaultResult> {
+  const config = getNetworkConfig(network);
+  const server = new Soroban.Server(config.sorobanRpcUrl);
+  const contractId = STELLAR_CONFIG.factoryContractId;
+
+  const contract = new Contract(contractId);
+  const walletService = new WalletService();
+
+  const account = await server.getAccount(claimerAddress);
+  const operation = contract.call(
+    'claim_stream',
+    nativeToScVal(claimerAddress, { type: 'address' }),
+    nativeToScVal(streamId, { type: 'u64' }),
+  );
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: config.networkPassphrase,
+  })
+    .addOperation(operation)
+    .setTimeout(180)
+    .build();
+
+  const prepared = await server.prepareTransaction(tx);
+  const signedXdr = await walletService.signTransaction(prepared.toXDR());
+  const signedTx = TransactionBuilder.fromXDR(
+    signedXdr,
+    config.networkPassphrase,
+  ) as Transaction;
+
+  const response = await server.sendTransaction(signedTx);
+  if (response.status === 'ERROR') {
+    throw new Error('claim_stream transaction failed');
+  }
+
+  // Poll for confirmation
+  let getResponse = await server.getTransaction(response.hash);
+  while (getResponse.status === 'NOT_FOUND') {
+    await new Promise((r) => setTimeout(r, 1000));
+    getResponse = await server.getTransaction(response.hash);
+  }
+  if (getResponse.status === 'FAILED') {
+    throw new Error('claim_stream transaction failed on-chain');
+  }
+
+  return { txHash: response.hash };
+}
