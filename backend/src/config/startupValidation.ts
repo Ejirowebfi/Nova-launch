@@ -15,6 +15,11 @@
  *  3. FACTORY_CONTRACT_ID must be set when STELLAR_NETWORK is "mainnet".
  */
 import { BackendEnv } from './env';
+import { outboundFetch } from '../lib/outboundHttpClient';
+
+// ---------------------------------------------------------------------------
+// Internal probe helpers
+// ---------------------------------------------------------------------------
 
 interface CheckResult {
   name: string;
@@ -31,21 +36,6 @@ async function probe(name: string, fn: () => Promise<void>): Promise<CheckResult
   }
 }
 
-async function checkHorizon(url: string): Promise<void> {
-  const res = await fetch(`${url}/`, { signal: AbortSignal.timeout(5000) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-}
-
-async function checkSoroban(url: string): Promise<void> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] }),
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-}
-
 async function checkDatabase(url: string): Promise<void> {
   // Validate URL format — actual connection is verified by Prisma on first query.
   // A malformed URL should fail fast here.
@@ -53,6 +43,95 @@ async function checkDatabase(url: string): Promise<void> {
   if (!parsed.protocol.startsWith('postgres') && !parsed.protocol.startsWith('mysql') && !parsed.protocol.startsWith('sqlite')) {
     throw new Error(`Unsupported database protocol: ${parsed.protocol}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Structured network validation
+// ---------------------------------------------------------------------------
+
+/** Structured result returned by runNetworkValidation. */
+export interface NetworkValidationResult {
+  horizon: {
+    reachable: boolean;
+    latencyMs: number | null;
+    /** Whether the Horizon root endpoint returned the expected network passphrase. */
+    passphraseMatches: boolean;
+  };
+  rpc: {
+    reachable: boolean;
+  };
+  ipfs: {
+    reachable: boolean;
+  };
+}
+
+const DEFAULT_IPFS_GATEWAY = 'https://gateway.pinata.cloud';
+
+async function probeHorizon(
+  url: string,
+  expectedPassphrase: string,
+): Promise<NetworkValidationResult['horizon']> {
+  const t0 = Date.now();
+  try {
+    const res = await outboundFetch(`${url}/`, { signal: AbortSignal.timeout(5000) });
+    const latencyMs = Date.now() - t0;
+    if (!res.ok) {
+      return { reachable: false, latencyMs: null, passphraseMatches: false };
+    }
+    const body = (await res.json()) as { network_passphrase?: string };
+    const passphraseMatches = body.network_passphrase === expectedPassphrase;
+    return { reachable: true, latencyMs, passphraseMatches };
+  } catch {
+    return { reachable: false, latencyMs: null, passphraseMatches: false };
+  }
+}
+
+async function probeRpc(url: string): Promise<NetworkValidationResult['rpc']> {
+  try {
+    const res = await outboundFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth', params: [] }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return { reachable: res.ok };
+  } catch {
+    return { reachable: false };
+  }
+}
+
+async function probeIpfs(gatewayUrl: string): Promise<NetworkValidationResult['ipfs']> {
+  try {
+    const res = await outboundFetch(gatewayUrl, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(5000),
+    });
+    // Any sub-500 status means the gateway is up and responding
+    return { reachable: res.status < 500 };
+  } catch {
+    return { reachable: false };
+  }
+}
+
+/**
+ * Run live reachability probes against Horizon, Soroban RPC, and the IPFS
+ * gateway.  Returns a structured report rather than throwing so callers can
+ * decide how to handle partial failures.
+ *
+ * @param env            Validated backend environment.
+ * @param ipfsGatewayUrl Override the IPFS gateway to probe (defaults to
+ *                       IPFS_GATEWAY_URL env var or https://gateway.pinata.cloud).
+ */
+export async function runNetworkValidation(
+  env: BackendEnv,
+  ipfsGatewayUrl: string = process.env.IPFS_GATEWAY_URL ?? DEFAULT_IPFS_GATEWAY,
+): Promise<NetworkValidationResult> {
+  const [horizon, rpc, ipfs] = await Promise.all([
+    probeHorizon(env.STELLAR_HORIZON_URL, env.STELLAR_NETWORK_PASSPHRASE),
+    probeRpc(env.STELLAR_SOROBAN_RPC_URL),
+    probeIpfs(ipfsGatewayUrl),
+  ]);
+  return { horizon, rpc, ipfs };
 }
 
 // ---------------------------------------------------------------------------
@@ -123,33 +202,37 @@ export function validateNetworkConfig(env: BackendEnv): void {
 export async function runStartupValidation(env: BackendEnv): Promise<void> {
   const isProduction = env.NODE_ENV === 'production';
 
-  // Fail fast on network config mismatch — always, regardless of environment
+  // Fail fast on static config mismatch — always, regardless of environment
   validateNetworkConfig(env);
 
-  const checks = await Promise.all([
-    probe('Stellar Horizon', () => checkHorizon(env.STELLAR_HORIZON_URL)),
-    probe('Stellar Soroban RPC', () => checkSoroban(env.STELLAR_SOROBAN_RPC_URL)),
+  // Run live reachability checks in parallel
+  const [networkReport, dbCheck] = await Promise.all([
+    runNetworkValidation(env),
     probe('Database URL', () => checkDatabase(env.DATABASE_URL)),
   ]);
 
-  const failures = checks.filter((c) => !c.ok);
+  const networkOk =
+    networkReport.horizon.reachable &&
+    networkReport.rpc.reachable &&
+    networkReport.ipfs.reachable;
+  const allOk = networkOk && dbCheck.ok;
 
-  if (failures.length === 0) {
-    console.log('✅ Startup validation passed:', checks.map((c) => c.name).join(', '));
+  if (allOk) {
+    console.log('✅ Startup validation passed. Network report:', JSON.stringify(networkReport));
     return;
   }
 
-  const report = failures
-    .map((c) => `  • ${c.name}: ${c.error}`)
-    .join('\n');
+  const failures: string[] = [];
+  if (!networkReport.horizon.reachable) failures.push('  • Stellar Horizon: unreachable');
+  if (!networkReport.rpc.reachable) failures.push('  • Stellar Soroban RPC: unreachable');
+  if (!networkReport.ipfs.reachable) failures.push('  • IPFS Gateway: unreachable');
+  if (!dbCheck.ok) failures.push(`  • Database URL: ${dbCheck.error}`);
 
-  const message = `Startup validation failed:\n${report}`;
+  const message = `Startup validation failed:\n${failures.join('\n')}`;
 
   if (isProduction) {
-    // Hard fail in production — a broken deployment should not serve traffic.
     throw new Error(message);
   } else {
-    // Warn in development — external services may not be running locally.
     console.warn(`⚠️  ${message}`);
   }
 }
