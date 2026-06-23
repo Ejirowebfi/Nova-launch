@@ -398,7 +398,9 @@ impl TokenFactory {
         // Overwrite any existing pending admin (prevents stale proposals)
         storage::set_pending_admin(&env, &new_admin);
 
+        // Emit both the legacy and new explicit AdminTransferProposed events
         events::emit_admin_proposed(&env, &current_admin, &new_admin);
+        events::emit_admin_transfer_proposed(&env, &current_admin, &new_admin);
 
         Ok(())
     }
@@ -432,7 +434,9 @@ impl TokenFactory {
         storage::set_admin(&env, &new_admin);
         storage::clear_pending_admin(&env);
 
+        // Emit both the legacy transfer event and the new explicit AdminTransferAccepted event
         events::emit_admin_transfer(&env, &old_admin, &new_admin);
+        events::emit_admin_transfer_accepted(&env, &old_admin, &new_admin);
 
         Ok(())
     }
