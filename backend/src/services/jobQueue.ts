@@ -16,6 +16,7 @@
  */
 
 import { register, Gauge, Counter, Histogram } from "prom-client";
+import { getCorrelationId, runWithContext } from "../lib/async-context";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,6 +37,8 @@ export interface Job<T = unknown> {
   runAt: Date; // earliest time the job may be picked up
   startedAt?: Date;
   error?: string;
+  /** Correlation ID from the originating HTTP request, for distributed tracing. */
+  correlationId?: string;
 }
 
 export type JobHandler<T = unknown> = (job: Job<T>) => Promise<void>;
@@ -162,6 +165,7 @@ export class JobQueue {
       status: "pending",
       createdAt: new Date(),
       runAt: new Date(Date.now() + (opts.delayMs ?? 0)),
+      correlationId: getCorrelationId(),
     };
 
     this.pending.push(job);
@@ -264,8 +268,14 @@ export class JobQueue {
     const handler = this.handlers.get(job.type)!;
     const startTime = Date.now();
 
+    // Wrap execution in the originating request's correlation ID context so that
+    // all logs emitted inside the handler carry the same correlationId.
+    const runHandler = job.correlationId
+      ? () => runWithContext(job.correlationId!, () => handler(job))
+      : () => handler(job);
+
     try {
-      await handler(job);
+      await runHandler();
       job.status = "completed";
       this.completedCount++;
       const duration = (Date.now() - startTime) / 1000;
