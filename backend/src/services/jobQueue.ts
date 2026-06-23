@@ -204,6 +204,73 @@ export class JobQueue {
     return [...this.dead];
   }
 
+  /**
+   * Return failed (dead-letter) jobs with optional filters.
+   * Filters: jobType, errorCode (substring match on error message), startDate, endDate.
+   */
+  failedJobs(filters: {
+    jobType?: string;
+    errorCode?: string;
+    startDate?: Date;
+    endDate?: Date;
+  } = {}): Job[] {
+    let jobs = [...this.dead];
+
+    if (filters.jobType) {
+      jobs = jobs.filter((j) => j.type === filters.jobType);
+    }
+    if (filters.errorCode) {
+      const needle = filters.errorCode.toLowerCase();
+      jobs = jobs.filter((j) => j.error?.toLowerCase().includes(needle));
+    }
+    if (filters.startDate) {
+      jobs = jobs.filter((j) => j.createdAt >= filters.startDate!);
+    }
+    if (filters.endDate) {
+      jobs = jobs.filter((j) => j.createdAt <= filters.endDate!);
+    }
+
+    return jobs;
+  }
+
+  /**
+   * Re-enqueue a dead-letter job: reset its retry counter and enqueue with
+   * high priority so it runs as soon as a worker is free.
+   * Returns the job, or null if no dead-letter job with that id exists.
+   */
+  retryJob(id: string): Job | null {
+    const idx = this.dead.findIndex((j) => j.id === id);
+    if (idx === -1) return null;
+
+    const [job] = this.dead.splice(idx, 1);
+
+    // Reset state for fresh execution
+    job.attempts = 0;
+    job.status = "pending";
+    job.runAt = new Date();
+    job.error = undefined;
+    // Elevate priority so the retry runs before normal-priority work
+    job.priority = Math.max(job.priority, 10);
+
+    this.pending.push(job);
+    this.pending.sort((a, b) => b.priority - a.priority);
+
+    this.updateMetrics();
+    this.scheduleTick();
+    return job;
+  }
+
+  /**
+   * Permanently discard a job from the dead-letter list.
+   * Returns true if the job was found and removed, false otherwise.
+   */
+  discardJob(id: string): boolean {
+    const idx = this.dead.findIndex((j) => j.id === id);
+    if (idx === -1) return false;
+    this.dead.splice(idx, 1);
+    return true;
+  }
+
   /** Number of currently active workers. */
   get workerCount(): number {
     return this.activeWorkers;

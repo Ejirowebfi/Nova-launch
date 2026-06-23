@@ -5,6 +5,7 @@ import usersRouter from "./users";
 import auditRouter from "./audit";
 import operationalRouter from "./operational";
 import backupRouter from "./backup";
+import jobsRouter from "./jobs";
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use("/users", usersRouter);
 router.use("/audit", auditRouter);
 router.use("/operational", operationalRouter);
 router.use("/backup", backupRouter);
+router.use("/jobs", jobsRouter);
 
 export default router;
