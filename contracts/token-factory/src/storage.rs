@@ -1859,3 +1859,72 @@ pub fn remove_pending_vault_owner_change(env: &Env, vault_id: u64) {
         .persistent()
         .remove(&crate::types::DataKey::PendingVaultOwnerChange(vault_id));
 }
+
+// ============================================================
+// Recurring Stream Storage
+// ============================================================
+
+/// Get recurring stream by ID
+pub fn get_recurring_stream(env: &Env, stream_id: u64) -> Option<crate::types::RecurringStream> {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::RecurringStream(stream_id))
+}
+
+/// Set recurring stream
+pub fn set_recurring_stream(env: &Env, stream_id: u64, stream: &crate::types::RecurringStream) {
+    env.storage()
+        .persistent()
+        .set(&crate::types::DataKey::RecurringStream(stream_id), stream);
+}
+
+/// Get total recurring stream count
+pub fn get_recurring_stream_count(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&crate::types::DataKey::RecurringStreamCount)
+        .unwrap_or(0)
+}
+
+/// Get next recurring stream ID and increment counter
+pub fn next_recurring_stream_id(env: &Env) -> u64 {
+    let id = env
+        .storage()
+        .instance()
+        .get(&crate::types::DataKey::NextRecurringStreamId)
+        .unwrap_or(0_u64);
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::NextRecurringStreamId, &(id + 1));
+    id
+}
+
+/// Get number of recurring streams created by a creator
+pub fn get_creator_recurring_stream_count(env: &Env, creator: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::CreatorRecurringStreamCount(creator.clone()))
+        .unwrap_or(0)
+}
+
+/// Get recurring stream ID by creator and index
+pub fn get_creator_recurring_stream(env: &Env, creator: &Address, index: u32) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::RecurringStreamByCreator(creator.clone(), index))
+}
+
+/// Record a new recurring stream for a creator
+pub fn add_creator_recurring_stream(env: &Env, creator: &Address, stream_id: u64) -> Result<(), Error> {
+    let count = get_creator_recurring_stream_count(env, creator);
+    env.storage().persistent().set(
+        &crate::types::DataKey::RecurringStreamByCreator(creator.clone(), count),
+        &stream_id,
+    );
+    let new_count = count.checked_add(1).ok_or(Error::ArithmeticError)?;
+    env.storage().persistent().set(
+        &crate::types::DataKey::CreatorRecurringStreamCount(creator.clone()),
+        &new_count,
+    );
+    Ok(())
+}

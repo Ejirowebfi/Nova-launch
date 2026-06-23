@@ -45,6 +45,7 @@ mod dividend_distribution;
 mod staking;
 mod streaming;
 mod stream_types;
+mod recurring_stream;
 #[cfg(test)]
 mod test_helpers;
 mod timelock;

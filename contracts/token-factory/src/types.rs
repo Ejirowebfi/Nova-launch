@@ -443,6 +443,62 @@ pub struct PendingVaultOwnerChange {
     pub creator_approved: bool,
 }
 
+/// Parameters for creating a recurring payment stream
+///
+/// Defines a stream that creates child streams automatically at fixed intervals.
+/// Each period creates an independent, claimable child stream.
+///
+/// # Fields
+/// * `recipient` - Payment recipient for each period
+/// * `amount_per_period` - Amount streamed in each period
+/// * `period_ledgers` - Duration of each period in ledgers
+/// * `total_periods` - Number of periods to create (max 1000)
+/// * `auto_renew` - Whether to continue creating periods after total_periods
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringStreamParams {
+    pub recipient: Address,
+    pub amount_per_period: i128,
+    pub period_ledgers: u64,
+    pub total_periods: u32,
+    pub auto_renew: bool,
+}
+
+/// Recurring payment stream tracking state
+///
+/// Tracks a recurring payment schedule that creates child streams automatically.
+/// When a period ends, a new child stream is created for the next period.
+///
+/// # Fields
+/// * `id` - Unique recurring stream ID
+/// * `creator` - Address that created this recurring stream (must authorize cancellations)
+/// * `recipient` - Payment recipient for each period
+/// * `amount_per_period` - Amount per period stream
+/// * `period_ledgers` - Duration of each period in ledgers
+/// * `total_periods` - Total periods requested (0 = unlimited if auto_renew true)
+/// * `periods_created` - How many periods have been created so far
+/// * `current_period_start_ledger` - Ledger when current period began
+/// * `auto_renew` - Whether to continue after total_periods (if total_periods > 0)
+/// * `auto_renew_enabled` - Current auto-renewal state (can be disabled by creator)
+/// * `cancelled` - Whether the recurring stream has been cancelled
+/// * `child_streams` - IDs of child streams created by this recurring stream
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringStream {
+    pub id: u64,
+    pub creator: Address,
+    pub recipient: Address,
+    pub amount_per_period: i128,
+    pub period_ledgers: u64,
+    pub total_periods: u32,
+    pub periods_created: u32,
+    pub current_period_start_ledger: u64,
+    pub auto_renew: bool,
+    pub auto_renew_enabled: bool,
+    pub cancelled: bool,
+    pub child_streams: Vec<u64>,
+}
+
 /// Staking Pool configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -689,6 +745,13 @@ pub enum DataKey {
     DistributionClaimed(u32, Address),
     /// Running total of amounts claimed for a distribution
     DistributionClaimedTotal(u32),
+    /// Recurring stream storage
+    RecurringStream(u64),
+    RecurringStreamCount,
+    NextRecurringStreamId,
+    /// Recurring streams by creator: (creator_address, index)
+    RecurringStreamByCreator(Address, u32),
+    CreatorRecurringStreamCount(Address),
 }
 
 /// A point-in-time record of a token holder's balance.
