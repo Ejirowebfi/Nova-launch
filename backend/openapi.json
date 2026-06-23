@@ -62,6 +62,10 @@
     {
       "name": "Webhooks",
       "description": "Webhook subscriptions and delivery"
+    },
+    {
+      "name": "Discovery",
+      "description": "Public token discovery marketplace"
     }
   ],
   "paths": {
@@ -1347,10 +1351,103 @@
           }
         }
       }
+    },
+    "/discover/tokens": {
+      "get": {
+        "tags": ["Discovery"],
+        "summary": "Public token discovery",
+        "description": "Browse and search all public tokens. No authentication required. Tokens with `isPublic=false` are always excluded. Results are cached for 5 minutes.",
+        "parameters": [
+          { "name": "q",           "in": "query", "schema": { "type": "string", "maxLength": 100 }, "description": "Full-text search across token name and symbol (PostgreSQL plainto_tsquery)" },
+          { "name": "category",    "in": "query", "schema": { "type": "string", "enum": ["DEFI","COMMUNITY","CREATOR","UTILITY","OTHER"] } },
+          { "name": "network",     "in": "query", "schema": { "type": "string", "enum": ["testnet","mainnet"] } },
+          { "name": "hasMetadata", "in": "query", "schema": { "type": "string", "enum": ["true","false"] } },
+          { "name": "sortBy",      "in": "query", "schema": { "type": "string", "enum": ["deployedAt","burnCount","totalSupply","trending"], "default": "deployedAt" } },
+          { "name": "sortOrder",   "in": "query", "schema": { "type": "string", "enum": ["asc","desc"], "default": "desc" } },
+          { "name": "limit",       "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } },
+          { "name": "offset",      "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of public tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "tokens": { "type": "array", "items": { "$ref": "#/components/schemas/DiscoveryToken" } },
+                        "total":  { "type": "integer" },
+                        "limit":  { "type": "integer" },
+                        "offset": { "type": "integer" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid query parameters" },
+          "429": { "description": "Rate limit exceeded (60 req / 15 min per IP)" }
+        }
+      }
+    },
+    "/tokens/{address}/visibility": {
+      "patch": {
+        "tags": ["Tokens"],
+        "summary": "Toggle token visibility",
+        "description": "Set `isPublic` on a token. Only the token creator (tenant) may call this endpoint.",
+        "security": [{ "TenantHeader": [] }, { "BearerAuth": [] }],
+        "parameters": [
+          { "name": "address", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Token contract address" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["isPublic"],
+                "properties": { "isPublic": { "type": "boolean" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Visibility updated" },
+          "400": { "description": "Missing/invalid body or no tenant context" },
+          "403": { "description": "Caller is not the token creator" },
+          "404": { "description": "Token not found" }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "DiscoveryToken": {
+        "type": "object",
+        "properties": {
+          "id":            { "type": "string" },
+          "address":       { "type": "string" },
+          "creator":       { "type": "string" },
+          "name":          { "type": "string" },
+          "symbol":        { "type": "string" },
+          "decimals":      { "type": "integer" },
+          "totalSupply":   { "type": "string", "description": "BigInt serialised as string" },
+          "initialSupply": { "type": "string" },
+          "totalBurned":   { "type": "string" },
+          "burnCount":     { "type": "integer" },
+          "metadataUri":   { "type": "string", "nullable": true },
+          "isPublic":      { "type": "boolean" },
+          "category":      { "type": "string", "enum": ["DEFI","COMMUNITY","CREATOR","UTILITY","OTHER"] },
+          "network":       { "type": "string", "enum": ["testnet","mainnet"] },
+          "createdAt":     { "type": "string", "format": "date-time" },
+          "updatedAt":     { "type": "string", "format": "date-time" }
+        }
+      },
       "ErrorResponse": {
         "type": "object",
         "properties": {
