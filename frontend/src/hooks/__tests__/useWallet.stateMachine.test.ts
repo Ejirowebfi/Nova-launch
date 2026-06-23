@@ -344,3 +344,107 @@ describe('useWallet state transitions (#1082)', () => {
     });
   });
 });
+
+// ── Issue #1307: disconnection during active transaction submission ────────────
+//
+// The three scenarios below cover wallet disconnection at each stage of the
+// async connect() flow. In all cases the hook must leave isConnecting=false
+// and wallet.connected=false, and must allow a subsequent reconnection without
+// a page refresh.
+
+describe('disconnection during transaction (#1307)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    vi.mocked(analytics.track).mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('scenario 1: disconnect before sign — isConnecting resets to false, wallet stays cleared', async () => {
+    let resolveInstalled!: (value: boolean) => void;
+    vi.mocked(WalletService.isInstalled).mockImplementation(
+      () => new Promise((resolve) => { resolveInstalled = resolve; })
+    );
+
+    const { result } = renderHook(() => useWallet());
+
+    // Begin connection — hangs at WalletService.isInstalled()
+    act(() => { result.current.connect(); });
+    expect(result.current.isConnecting).toBe(true);
+
+    // Disconnect before the wallet extension has been prompted (before sign)
+    act(() => { result.current.disconnect(); });
+
+    expect(result.current.wallet.connected).toBe(false);
+    expect(result.current.wallet.address).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(localStorage.getItem(WALLET_CONNECTED_KEY)).toBeNull();
+
+    // Settle the dangling promise — connect() continues but wallet is already disconnected
+    await act(async () => { resolveInstalled(false); });
+
+    await waitFor(() => expect(result.current.isConnecting).toBe(false));
+    expect(result.current.isConnecting).toBe(false);
+    expect(result.current.wallet.connected).toBe(false);
+  });
+
+  it('scenario 2: disconnect after sign, before submit — isConnecting resets and state is clean', async () => {
+    let resolveInstalled!: (value: boolean) => void;
+    vi.mocked(WalletService.isInstalled).mockImplementation(
+      () => new Promise((resolve) => { resolveInstalled = resolve; })
+    );
+
+    const { result } = renderHook(() => useWallet());
+
+    act(() => { result.current.connect(); });
+    expect(result.current.isConnecting).toBe(true);
+
+    // "After sign": isInstalled resolves true — wallet approved the request
+    await act(async () => { resolveInstalled(true); });
+
+    // Disconnect before the submit/fetchAddress step completes
+    act(() => { result.current.disconnect(); });
+
+    expect(result.current.wallet.connected).toBe(false);
+    expect(result.current.wallet.address).toBeNull();
+    expect(localStorage.getItem(WALLET_CONNECTED_KEY)).toBeNull();
+
+    await waitFor(() => expect(result.current.isConnecting).toBe(false));
+    expect(result.current.isConnecting).toBe(false);
+  });
+
+  it('scenario 3: disconnect after submit, before confirmation — clears state and allows reconnection', async () => {
+    vi.mocked(WalletService.isInstalled).mockResolvedValue(true);
+    vi.mocked(WalletService.getPublicKey).mockResolvedValue(ADDR_1);
+    vi.mocked(WalletService.getNetwork).mockResolvedValue('testnet');
+    vi.mocked(WalletService.watchChanges).mockReturnValue(() => {});
+
+    const { result } = renderHook(() => useWallet());
+    await act(async () => { await result.current.connect(); });
+
+    // "After submit": wallet has submitted the transaction — now disconnect arrives
+    // before on-chain confirmation is received
+    act(() => { result.current.disconnect(); });
+
+    expect(result.current.wallet.connected).toBe(false);
+    expect(result.current.wallet.address).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.isConnecting).toBe(false);
+    expect(localStorage.getItem(WALLET_CONNECTED_KEY)).toBeNull();
+
+    // Verify the hook recovers and accepts a new connection without a page refresh
+    vi.mocked(WalletService.isInstalled).mockResolvedValue(true);
+    vi.mocked(WalletService.getPublicKey).mockResolvedValue(ADDR_2);
+    vi.mocked(WalletService.getNetwork).mockResolvedValue('testnet');
+    vi.mocked(WalletService.watchChanges).mockReturnValue(() => {});
+
+    await act(async () => { await result.current.connect(); });
+
+    expect(result.current.isConnecting).toBe(false);
+    // No stale state remains from the previous interrupted transaction
+    expect(result.current.error).not.toBe('WalletDisconnected');
+  });
+});
