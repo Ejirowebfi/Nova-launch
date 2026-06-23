@@ -1,13 +1,85 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, DataSource } from "typeorm";
-import { BurnEvent, BurnType } from "./entities/burn-event.entity";
-import {
-  TimePeriod,
-  TokenAnalyticsResponseDto,
-  TimeSeriesDataPoint,
-  PeriodStats,
-} from "./dto/analytics.dto";
+/**
+ * Token Analytics Service
+ *
+ * Provides burn analytics for individual tokens with a pre-aggregated
+ * time-bucket pipeline to avoid full-table scans on high-activity tokens.
+ *
+ * Issue: #1357
+ */
+
+import { prisma } from "../lib/prisma";
+import { Prisma } from "@prisma/client";
+
+export type Granularity = "hour" | "day" | "week";
+
+export interface PeriodStats {
+  volume: string;
+  count: number;
+  uniqueBurners: number;
+}
+
+export interface TimeSeriesDataPoint {
+  timestamp: string;
+  value: string;
+  count: number;
+}
+
+export interface BurnTypeDistribution {
+  self: string;
+  admin: string;
+  selfPercentage: number;
+  adminPercentage: number;
+}
+
+export interface TokenAnalyticsResponseDto {
+  tokenAddress: string;
+  period: string;
+  generatedAt: string;
+
+  // All-time
+  totalBurned: string;
+  totalBurnCount: number;
+  allTimeUniqueBurners: number;
+  largestBurn: string;
+  largestBurnTx: string;
+
+  // Fixed-window stats
+  stats24h: PeriodStats;
+  stats7d: PeriodStats;
+  stats30d: PeriodStats;
+
+  // Current period
+  periodVolume: string;
+  periodBurnCount: number;
+  periodUniqueBurners: number;
+  averageBurnAmount: string;
+  burnFrequencyPerDay: number;
+
+  // Comparison vs previous period
+  volumeChangePercent: number;
+  countChangePercent: number;
+
+  // Chart data
+  timeSeries: TimeSeriesDataPoint[];
+  burnTypeDistribution: BurnTypeDistribution;
+}
+
+export interface BucketQueryResult {
+  bucketStart: Date;
+  granularity: string;
+  burnVolume: string;
+  transferCount: number;
+  holderCount: number;
+}
+
+/** Shape of an analytics event passed into aggregateIntoBuckets */
+export interface AnalyticsEvent {
+  tokenId: string;
+  burnVolume: bigint;
+  transferCount?: number;
+  holderCount?: number;
+  eventTime: Date;
+}
 
 interface PeriodWindow {
   start: Date;
@@ -16,13 +88,22 @@ interface PeriodWindow {
   intervalCount: number;
 }
 
-@Injectable()
+export type TimePeriod = "24h" | "7d" | "30d" | "90d" | "all";
+
+const GRANULARITIES: Granularity[] = ["hour", "day", "week"];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Injectable prisma dependency for testability
+// ──────────────────────────────────────────────────────────────────────────────
+
+type PrismaDep = Pick<typeof prisma, "analyticsBucket">;
+
 export class AnalyticsService {
-  constructor(
-    @InjectRepository(BurnEvent)
-    private readonly burnRepo: Repository<BurnEvent>,
-    private readonly dataSource: DataSource
-  ) {}
+  private readonly db: PrismaDep;
+
+  constructor(db?: PrismaDep) {
+    this.db = db ?? prisma;
+  }
 
   // ──────────────────────────────────────────────
   // Public API
@@ -35,13 +116,11 @@ export class AnalyticsService {
     const normalizedAddress = tokenAddress.toLowerCase();
 
     // Verify token has any burns at all
-    const exists = await this.burnRepo.count({
-      where: { tokenAddress: normalizedAddress },
-    });
+    const exists = await this.countBurnEvents(normalizedAddress);
     if (exists === 0) {
-      throw new NotFoundException(
-        `No burn data found for token ${tokenAddress}`
-      );
+      const err = new Error(`No burn data found for token ${tokenAddress}`);
+      (err as any).status = 404;
+      throw err;
     }
 
     const window = this.getPeriodWindow(period);
@@ -123,25 +202,212 @@ export class AnalyticsService {
     };
   }
 
+  /**
+   * Upsert pre-aggregated AnalyticsBucket rows for all three granularities
+   * (hour, day, week) on every new analytics event.
+   *
+   * Called after each new burn/transfer event is persisted so that the
+   * buckets stay current without needing a full table scan.
+   */
+  async aggregateIntoBuckets(event: AnalyticsEvent): Promise<void> {
+    const ops = GRANULARITIES.map((gran) => {
+      const bucketStart = this.truncateToBucket(event.eventTime, gran);
+      return this.db.analyticsBucket.upsert({
+        where: {
+          tokenId_bucketStart_granularity: {
+            tokenId: event.tokenId,
+            bucketStart,
+            granularity: gran,
+          },
+        },
+        create: {
+          tokenId: event.tokenId,
+          bucketStart,
+          granularity: gran,
+          burnVolume: event.burnVolume,
+          transferCount: event.transferCount ?? 0,
+          holderCount: event.holderCount ?? 0,
+        },
+        update: {
+          burnVolume: {
+            increment: event.burnVolume,
+          },
+          transferCount: {
+            increment: event.transferCount ?? 0,
+          },
+          holderCount: {
+            increment: event.holderCount ?? 0,
+          },
+        },
+      });
+    });
+
+    await Promise.all(ops);
+  }
+
+  /**
+   * Paginated backfill: scans existing burn_events for the given tokenId
+   * and populates AnalyticsBucket rows for all granularities.
+   *
+   * Designed for first-run scenarios.  Each page is processed in sequence
+   * to avoid overwhelming the database.
+   */
+  async backfillBuckets(
+    tokenId: string,
+    pageSize = 500
+  ): Promise<{ pagesProcessed: number; eventsProcessed: number }> {
+    let skip = 0;
+    let pagesProcessed = 0;
+    let eventsProcessed = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const rows = await this.queryBurnEventsPage(tokenId, pageSize, skip);
+
+      if (rows.length === 0) break;
+
+      // Group by bucket boundaries for each granularity to minimise upserts
+      const bucketMap = new Map<
+        string,
+        {
+          tokenId: string;
+          bucketStart: Date;
+          granularity: string;
+          burnVolume: bigint;
+          transferCount: number;
+        }
+      >();
+
+      for (const row of rows) {
+        const eventTime = new Date(row.burned_at);
+        const volume = BigInt(row.amount);
+
+        for (const gran of GRANULARITIES) {
+          const bucketStart = this.truncateToBucket(eventTime, gran);
+          const key = `${tokenId}:${gran}:${bucketStart.toISOString()}`;
+          const existing = bucketMap.get(key);
+          if (existing) {
+            existing.burnVolume += volume;
+            existing.transferCount += 1;
+          } else {
+            bucketMap.set(key, {
+              tokenId,
+              bucketStart,
+              granularity: gran,
+              burnVolume: volume,
+              transferCount: 1,
+            });
+          }
+        }
+      }
+
+      // Upsert all accumulated buckets from this page
+      await Promise.all(
+        Array.from(bucketMap.values()).map((b) =>
+          this.db.analyticsBucket.upsert({
+            where: {
+              tokenId_bucketStart_granularity: {
+                tokenId: b.tokenId,
+                bucketStart: b.bucketStart,
+                granularity: b.granularity,
+              },
+            },
+            create: {
+              tokenId: b.tokenId,
+              bucketStart: b.bucketStart,
+              granularity: b.granularity,
+              burnVolume: b.burnVolume,
+              transferCount: b.transferCount,
+              holderCount: 0,
+            },
+            update: {
+              burnVolume: { increment: b.burnVolume },
+              transferCount: { increment: b.transferCount },
+            },
+          })
+        )
+      );
+
+      eventsProcessed += rows.length;
+      pagesProcessed += 1;
+      skip += pageSize;
+
+      if (rows.length < pageSize) break;
+    }
+
+    return { pagesProcessed, eventsProcessed };
+  }
+
+  /**
+   * Query pre-aggregated buckets for a given token, granularity, and window.
+   * Used by the controller when a granularity query param is present.
+   */
+  async getBuckets(
+    tokenId: string,
+    granularity: Granularity,
+    start: Date,
+    end: Date
+  ): Promise<BucketQueryResult[]> {
+    const rows = await this.db.analyticsBucket.findMany({
+      where: {
+        tokenId,
+        granularity,
+        bucketStart: { gte: start, lt: end },
+      },
+      orderBy: { bucketStart: "asc" },
+    });
+
+    return rows.map((r) => ({
+      bucketStart: r.bucketStart,
+      granularity: r.granularity,
+      burnVolume: r.burnVolume.toString(),
+      transferCount: r.transferCount,
+      holderCount: r.holderCount,
+    }));
+  }
+
   // ──────────────────────────────────────────────
-  // Query helpers
+  // Query helpers (mockable via subclass or vi.spyOn in tests)
   // ──────────────────────────────────────────────
 
-  private async getAllTimeStats(tokenAddress: string) {
-    const row = await this.dataSource.query(
-      `SELECT
-         COALESCE(SUM(amount::numeric), 0)::text AS "totalVolume",
-         COUNT(*)::int                           AS "totalCount",
-         COUNT(DISTINCT burner_address)::int     AS "uniqueBurners"
-       FROM burn_events
-       WHERE token_address = $1`,
-      [tokenAddress]
-    );
-    return row[0] as {
-      totalVolume: string;
-      totalCount: number;
-      uniqueBurners: number;
-    };
+  /** Overridable for tests that don't want to spin up a real DB. */
+  protected async countBurnEvents(tokenAddress: string): Promise<number> {
+    const result = await prisma.$queryRaw<[{ cnt: bigint }]>`
+      SELECT COUNT(*)::int AS cnt FROM burn_events WHERE token_address = ${tokenAddress}
+    `;
+    return Number(result[0].cnt);
+  }
+
+  protected async queryBurnEventsPage(
+    tokenAddress: string,
+    pageSize: number,
+    skip: number
+  ): Promise<{ amount: string; burned_at: Date }[]> {
+    return prisma.$queryRaw<{ amount: string; burned_at: Date }[]>`
+      SELECT amount, burned_at
+      FROM burn_events
+      WHERE token_address = ${tokenAddress}
+      ORDER BY burned_at ASC
+      LIMIT ${pageSize} OFFSET ${skip}
+    `;
+  }
+
+  private async getAllTimeStats(tokenAddress: string): Promise<{
+    totalVolume: string;
+    totalCount: number;
+    uniqueBurners: number;
+  }> {
+    const rows = await prisma.$queryRaw<
+      { totalVolume: string; totalCount: number; uniqueBurners: number }[]
+    >`
+      SELECT
+        COALESCE(SUM(amount::numeric), 0)::text AS "totalVolume",
+        COUNT(*)::int                           AS "totalCount",
+        COUNT(DISTINCT burner_address)::int     AS "uniqueBurners"
+      FROM burn_events
+      WHERE token_address = ${tokenAddress}
+    `;
+    return rows[0];
   }
 
   private async getPeriodStats(
@@ -149,53 +415,56 @@ export class AnalyticsService {
     start: Date,
     end: Date
   ): Promise<PeriodStats> {
-    const row = await this.dataSource.query(
-      `SELECT
-         COALESCE(SUM(amount::numeric), 0)::text AS volume,
-         COUNT(*)::int                           AS count,
-         COUNT(DISTINCT burner_address)::int     AS "uniqueBurners"
-       FROM burn_events
-       WHERE token_address = $1
-         AND burned_at >= $2
-         AND burned_at < $3`,
-      [tokenAddress, start, end]
-    );
-    return row[0] as PeriodStats;
+    const rows = await prisma.$queryRaw<PeriodStats[]>`
+      SELECT
+        COALESCE(SUM(amount::numeric), 0)::text AS volume,
+        COUNT(*)::int                           AS count,
+        COUNT(DISTINCT burner_address)::int     AS "uniqueBurners"
+      FROM burn_events
+      WHERE token_address = ${tokenAddress}
+        AND burned_at >= ${start}
+        AND burned_at < ${end}
+    `;
+    return rows[0];
   }
 
   private async getLargestBurn(
     tokenAddress: string
-  ): Promise<BurnEvent | null> {
-    return this.burnRepo.findOne({
-      where: { tokenAddress },
-      order: { amount: "DESC" } as any,
-    });
+  ): Promise<{ amount: string; txHash: string } | null> {
+    const rows = await prisma.$queryRaw<{ amount: string; txHash: string }[]>`
+      SELECT amount::text, transaction_hash AS "txHash"
+      FROM burn_events
+      WHERE token_address = ${tokenAddress}
+      ORDER BY amount::numeric DESC
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
   }
 
   private async getBurnTypeDistribution(
     tokenAddress: string,
     start: Date,
     end: Date
-  ) {
-    const rows: { burn_type: BurnType; volume: string; cnt: number }[] =
-      await this.dataSource.query(
-        `SELECT
-           burn_type,
-           COALESCE(SUM(amount::numeric), 0)::text AS volume,
-           COUNT(*)::int AS cnt
-         FROM burn_events
-         WHERE token_address = $1
-           AND burned_at >= $2
-           AND burned_at < $3
-         GROUP BY burn_type`,
-        [tokenAddress, start, end]
-      );
+  ): Promise<BurnTypeDistribution> {
+    const rows = await prisma.$queryRaw<
+      { burn_type: string; volume: string; cnt: number }[]
+    >`
+      SELECT
+        burn_type,
+        COALESCE(SUM(amount::numeric), 0)::text AS volume,
+        COUNT(*)::int AS cnt
+      FROM burn_events
+      WHERE token_address = ${tokenAddress}
+        AND burned_at >= ${start}
+        AND burned_at < ${end}
+      GROUP BY burn_type
+    `;
 
-    const byType = (type: BurnType) =>
+    const byType = (type: string) =>
       rows.find((r) => r.burn_type === type) ?? { volume: "0", cnt: 0 };
 
-    const selfRow = byType(BurnType.SELF);
-    const adminRow = byType(BurnType.ADMIN);
+    const selfRow = byType("self");
+    const adminRow = byType("admin");
 
     const totalVolume = BigInt(selfRow.volume) + BigInt(adminRow.volume);
 
@@ -216,29 +485,26 @@ export class AnalyticsService {
     tokenAddress: string,
     window: PeriodWindow
   ): Promise<TimeSeriesDataPoint[]> {
-    const pgTrunc = {
-      hour: "hour",
-      day: "day",
-      week: "week",
-      month: "month",
-    }[window.granularity];
+    const gran = window.granularity;
+    // Safe: gran is constrained to known literal values
+    const rows = await prisma.$queryRawUnsafe<
+      { ts: string; value: string; count: number }[]
+    >(
+      `SELECT
+         DATE_TRUNC('${gran}', burned_at)::text AS ts,
+         COALESCE(SUM(amount::numeric), 0)::text AS value,
+         COUNT(*)::int AS count
+       FROM burn_events
+       WHERE token_address = $1
+         AND burned_at >= $2
+         AND burned_at < $3
+       GROUP BY DATE_TRUNC('${gran}', burned_at)
+       ORDER BY ts ASC`,
+      tokenAddress,
+      window.start,
+      window.end
+    );
 
-    const rows: { ts: string; value: string; count: number }[] =
-      await this.dataSource.query(
-        `SELECT
-           DATE_TRUNC('${pgTrunc}', burned_at)::text AS ts,
-           COALESCE(SUM(amount::numeric), 0)::text   AS value,
-           COUNT(*)::int                             AS count
-         FROM burn_events
-         WHERE token_address = $1
-           AND burned_at >= $2
-           AND burned_at < $3
-         GROUP BY DATE_TRUNC('${pgTrunc}', burned_at)
-         ORDER BY ts ASC`,
-        [tokenAddress, window.start, window.end]
-      );
-
-    // Fill gaps so the chart has a complete series
     return this.fillTimeSeriesGaps(rows, window);
   }
 
@@ -265,41 +531,71 @@ export class AnalyticsService {
   }
 
   // ──────────────────────────────────────────────
+  // Bucket utilities
+  // ──────────────────────────────────────────────
+
+  /**
+   * Truncate a Date to the start of its granularity bucket (UTC-aligned).
+   */
+  truncateToBucket(date: Date, granularity: Granularity): Date {
+    const d = new Date(date);
+    d.setUTCMilliseconds(0);
+    d.setUTCSeconds(0);
+    d.setUTCMinutes(0);
+
+    if (granularity === "hour") {
+      return d;
+    }
+
+    d.setUTCHours(0);
+
+    if (granularity === "day") {
+      return d;
+    }
+
+    // "week" — ISO-week: truncate to the Monday of the current week
+    const dayOfWeek = d.getUTCDay(); // 0 = Sunday
+    const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    d.setUTCDate(d.getUTCDate() - daysToMonday);
+    return d;
+  }
+
+  // ──────────────────────────────────────────────
   // Time-window utilities
   // ──────────────────────────────────────────────
 
   private getPeriodWindow(period: TimePeriod): PeriodWindow {
     const now = new Date();
     switch (period) {
-      case TimePeriod.H24:
+      case "24h":
         return {
           start: this.hoursAgo(24),
           end: now,
           granularity: "hour",
           intervalCount: 24,
         };
-      case TimePeriod.D7:
+      case "7d":
         return {
           start: this.daysAgo(7),
           end: now,
           granularity: "day",
           intervalCount: 7,
         };
-      case TimePeriod.D30:
+      case "30d":
         return {
           start: this.daysAgo(30),
           end: now,
           granularity: "day",
           intervalCount: 30,
         };
-      case TimePeriod.D90:
+      case "90d":
         return {
           start: this.daysAgo(90),
           end: now,
           granularity: "week",
           intervalCount: 13,
         };
-      case TimePeriod.ALL:
+      case "all":
       default:
         return {
           start: new Date("2020-01-01"),
@@ -355,3 +651,6 @@ export class AnalyticsService {
     return Math.round(change * 100) / 100;
   }
 }
+
+/** Singleton instance for use across the app */
+export const analyticsService = new AnalyticsService();

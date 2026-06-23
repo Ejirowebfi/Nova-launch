@@ -404,3 +404,27 @@ model IntegrationState {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+/// Pre-aggregated time-bucket rows for token analytics.
+/// One row per (tokenId, bucketStart, granularity) combination.
+/// Maintained incrementally on each new analytics event and via a paginated backfill
+/// so that dashboard queries read from this table instead of doing full scans.
+model AnalyticsBucket {
+  id            String   @id @default(uuid())
+  tokenId       String
+  /// UTC-aligned bucket start (truncated to the granularity boundary)
+  bucketStart   DateTime
+  /// One of "hour" | "day" | "week"
+  granularity   String
+  burnVolume    Decimal  @default(0) @db.Decimal(78, 0)
+  transferCount Int      @default(0)
+  holderCount   Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tokenId, bucketStart, granularity])
+  @@index([tokenId])
+  @@index([tokenId, granularity, bucketStart])
+  @@index([bucketStart])
+  @@index([granularity])
+}
