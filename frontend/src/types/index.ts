@@ -195,6 +195,13 @@ export interface VaultProjection {
     amount: string;
     status: string;
     createdAt: string | number | Date;
+    /** Ledger at which vesting starts (on-chain field). */
+    startLedger?: number;
+    /** Ledger at which vesting fully matures (on-chain field). */
+    endLedger?: number;
+    claimedAt?: string | number | Date | null;
+    cancelledAt?: string | number | Date | null;
+    txHash?: string;
 }
 
 export * from './governance';
