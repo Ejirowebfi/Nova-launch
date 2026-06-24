@@ -680,6 +680,9 @@ pub enum DataKey {
     MetadataContentHash(u32),
     /// Pending vault-owner change: vault_id → (new_owner, approvals_bitmap)
     PendingVaultOwnerChange(u64),
+    /// FIFO execution queue of proposal ids for a given action type (#1366).
+    /// Stores an ordered `Vec<u64>`; index 0 is the front (next to execute).
+    ProposalTypeQueue(ActionType),
 }
 
 /// A point-in-time record of a token holder's balance.
@@ -975,6 +978,9 @@ impl Error {
     pub const VaultOwnerChangePending: Self = Self(97);
     pub const VaultOwnerChangeNotFound: Self = Self(98);
     pub const VaultOwnerChangeAlreadyApproved: Self = Self(99);
+    /// Attempted to execute a proposal that is not at the front of its
+    /// per-type FIFO execution queue (#1366).
+    pub const ProposalNotAtQueueFront: Self = Self(100);
 }
 
 impl From<Error> for soroban_sdk::Error {
