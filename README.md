@@ -1,4 +1,4 @@
-#  Stellar Token Deployer (Nova Launch)
+# Stellar Token Deployer (Nova Launch)
 
 <div align="center">
 
@@ -21,7 +21,7 @@
 
 ---
 
-##  Table of Contents
+## Table of Contents
 
 - [Overview](#-overview)
 - [Features](#-features)
@@ -47,7 +47,7 @@
 
 ---
 
-##  Overview
+## Overview
 
 **Stellar Token Deployer** (Nova Launch) is a decentralized application that enables creators, entrepreneurs, and businesses in emerging markets to deploy custom tokens on the Stellar blockchain without writing a single line of code.
 
@@ -72,6 +72,7 @@ Pay minimal XLM fees to deploy and mint tokens directly to your wallet. Optional
 ### Current Features (MVP)
 
 #### 🏭 Token Factory Smart Contract
+
 - ✅ Deploy custom tokens with configurable parameters
 - ✅ Set token name, symbol, decimals, and initial supply
 - ✅ Automatic minting to creator's wallet
@@ -80,6 +81,7 @@ Pay minimal XLM fees to deploy and mint tokens directly to your wallet. Optional
 - ✅ Token registry for tracking deployments
 
 #### 🎨 Frontend Application
+
 - ✅ Wallet connection via Freighter
 - ✅ Network switching (Testnet/Mainnet)
 - ✅ Multi-step token deployment form
@@ -92,12 +94,14 @@ Pay minimal XLM fees to deploy and mint tokens directly to your wallet. Optional
 - ✅ Installable on mobile and desktop
 
 #### 🖼️ Metadata Support
+
 - ✅ Optional IPFS metadata upload
 - ✅ Token images and descriptions
 - ✅ On-chain metadata URI storage
 - ✅ Image validation and preview
 
 #### 🧪 Testing & Quality
+
 - ✅ Comprehensive unit tests
 - ✅ Property-based testing
 - ✅ 27+ passing tests
@@ -169,31 +173,31 @@ Pay minimal XLM fees to deploy and mint tokens directly to your wallet. Optional
 
 ### Smart Contracts
 
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| **Rust** | 2021 | Smart contract language |
-| **Soroban SDK** | 21.0.0 | Stellar smart contract framework |
-| **soroban-token-sdk** | Latest | Token standard implementation |
-| **proptest** | 1.4 | Property-based testing |
+| Technology            | Version | Purpose                          |
+| --------------------- | ------- | -------------------------------- |
+| **Rust**              | 2021    | Smart contract language          |
+| **Soroban SDK**       | 21.0.0  | Stellar smart contract framework |
+| **soroban-token-sdk** | Latest  | Token standard implementation    |
+| **proptest**          | 1.4     | Property-based testing           |
 
 ### Frontend
 
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| **React** | 19.2.0 | UI framework |
-| **TypeScript** | 5.9.3 | Type safety |
-| **Vite** | 8.0.0-beta | Build tool |
-| **Tailwind CSS** | 4.1.18 | Styling |
-| **Vitest** | 4.0.18 | Testing framework |
-| **fast-check** | 4.5.3 | Property-based testing |
+| Technology       | Version    | Purpose                |
+| ---------------- | ---------- | ---------------------- |
+| **React**        | 19.2.0     | UI framework           |
+| **TypeScript**   | 5.9.3      | Type safety            |
+| **Vite**         | 8.0.0-beta | Build tool             |
+| **Tailwind CSS** | 4.1.18     | Styling                |
+| **Vitest**       | 4.0.18     | Testing framework      |
+| **fast-check**   | 4.5.3      | Property-based testing |
 
 ### Integration
 
-| Service | Purpose |
-|---------|---------|
+| Service         | Purpose                |
+| --------------- | ---------------------- |
 | **Stellar SDK** | Blockchain interaction |
-| **Freighter** | Wallet connection |
-| **Pinata** | IPFS metadata storage |
+| **Freighter**   | Wallet connection      |
+| **Pinata**      | IPFS metadata storage  |
 | **Horizon API** | Transaction monitoring |
 
 ---
@@ -242,11 +246,52 @@ chmod +x ../../scripts/setup-soroban.sh
 ```
 
 This script will:
+
 - Install Rust and wasm32 target
 - Install Soroban CLI
 - Configure Stellar testnet
 - Generate admin identity
 - Provide funding instructions
+
+### Docker (Local Development)
+
+The fastest way to run the full stack locally is with Docker Compose.
+
+**Prerequisites:** Docker 24+ and Docker Compose v2.
+
+```bash
+# 1. Copy and configure environment variables
+cp .env.example .env
+# Edit .env — at minimum set JWT_SECRET and ADMIN_JWT_SECRET
+
+# 2. Start all services (postgres, redis, backend, frontend)
+docker compose up --build
+
+# 3. Open the app
+#    Frontend → http://localhost:5173
+#    Backend  → http://localhost:3001
+```
+
+To stop and remove containers:
+
+```bash
+docker compose down
+# Add -v to also remove the postgres volume (wipes database)
+docker compose down -v
+```
+
+**Services started by Docker Compose:**
+
+| Service  | Port | Description                       |
+| -------- | ---- | --------------------------------- |
+| postgres | 5432 | PostgreSQL 16 database            |
+| redis    | 6379 | Redis 7 (rate limiter)            |
+| backend  | 3001 | Express/Next.js API               |
+| frontend | 5173 | React/Vite app (served via nginx) |
+
+> **Note:** `VITE_*` variables are baked into the frontend at build time. If you change them in `.env`, rebuild with `docker compose up --build frontend`.
+
+---
 
 ### Development
 
@@ -312,6 +357,8 @@ soroban contract optimize \
 
 For detailed deployment instructions, see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md).
 
+For the end-to-end production deployment and post-deploy verification runbook, see [docs/PRODUCTION_INTEGRATION_RUNBOOK.md](docs/PRODUCTION_INTEGRATION_RUNBOOK.md).
+
 ---
 
 ## 📁 Project Structure
@@ -376,6 +423,7 @@ The Token Factory is the core smart contract that handles token deployment and m
 #### Contract Functions
 
 ##### `initialize`
+
 Initialize the factory with admin, treasury, and fee structure.
 
 ```rust
@@ -389,6 +437,7 @@ pub fn initialize(
 ```
 
 ##### `create_token`
+
 Deploy a new token with specified parameters.
 
 ```rust
@@ -404,6 +453,7 @@ pub fn create_token(
 ```
 
 ##### `set_metadata`
+
 Add metadata URI to an existing token.
 
 ```rust
@@ -416,7 +466,58 @@ pub fn set_metadata(
 ) -> Result<(), Error>
 ```
 
+##### `update_metadata`
+
+Update the metadata URI for a token with full version tracking. Each call increments the on-chain version counter and records a permanent history entry.
+
+```rust
+pub fn update_metadata(
+    env: Env,
+    admin: Address,
+    token_index: u32,
+    new_metadata_uri: String,
+) -> Result<u32, Error>
+```
+
+**Parameters:**
+
+- `admin`: Token creator address (must authorize)
+- `token_index`: Index of the token to update
+- `new_metadata_uri`: New IPFS URI (e.g., `"ipfs://QmNewHash..."`)
+
+**Returns:** The new version number (starts at 2 after the first update).
+
+**Errors:**
+
+- `MetadataNotSet` (54) — metadata was never set; call `set_token_metadata` first
+- `Unauthorized` — caller is not the token creator
+- `TokenNotFound` — token index does not exist
+- `ContractPaused` — contract is paused
+
+**Events:** Emits `meta_upd` with token address, admin, new URI, and version.
+
+##### `get_metadata_history`
+
+Retrieve a historical metadata record for a specific version.
+
+```rust
+pub fn get_metadata_history(
+    env: Env,
+    token_index: u32,
+    version: u32,
+) -> Option<MetadataRecord>
+```
+
+**Returns:** `Some(MetadataRecord)` if the version exists, `None` otherwise.
+
+`MetadataRecord` fields:
+
+- `uri: String` — the metadata URI at that version
+- `updated_at: u64` — ledger timestamp of the update
+- `updated_by: Address` — address that performed the update
+
 ##### `mint_tokens`
+
 Mint additional tokens (admin only).
 
 ```rust
@@ -431,6 +532,7 @@ pub fn mint_tokens(
 ```
 
 ##### `burn`
+
 Allows token holders to burn their own tokens, permanently removing them from circulation.
 
 ```rust
@@ -443,11 +545,13 @@ pub fn burn(
 ```
 
 **Parameters:**
+
 - `token_address`: Address of the token contract
 - `from`: Address of the token holder burning tokens
 - `amount`: Amount of tokens to burn (in smallest unit)
 
 **Example:**
+
 ```rust
 // Burn 1000 tokens (with 7 decimals)
 factory.burn(
@@ -458,6 +562,7 @@ factory.burn(
 ```
 
 ##### `admin_burn`
+
 Allows token admin to burn tokens from any address (clawback).
 
 ```rust
@@ -473,6 +578,7 @@ pub fn admin_burn(
 **Security Note:** Only the token creator can perform admin burns.
 
 ##### `burn_batch`
+
 Burn tokens from multiple addresses in a single transaction.
 
 ```rust
@@ -486,6 +592,7 @@ pub fn burn_batch(
 **Gas Optimization:** More efficient than multiple individual burns.
 
 ##### `update_fees`
+
 Update fee structure (admin only).
 
 ```rust
@@ -498,6 +605,7 @@ pub fn update_fees(
 ```
 
 ##### `get_state`
+
 Get current factory state.
 
 ```rust
@@ -505,6 +613,7 @@ pub fn get_state(env: Env) -> FactoryState
 ```
 
 ##### `get_base_fee`
+
 Get the current base fee for token deployment.
 
 ```rust
@@ -514,6 +623,7 @@ pub fn get_base_fee(env: Env) -> i128
 Returns the base fee amount in stroops that must be paid for any token deployment, regardless of metadata inclusion.
 
 ##### `get_metadata_fee`
+
 Get the current metadata fee for token deployment.
 
 ```rust
@@ -523,6 +633,7 @@ pub fn get_metadata_fee(env: Env) -> i128
 Returns the additional fee amount in stroops that must be paid when deploying a token with metadata (IPFS URI).
 
 ##### `get_token_info`
+
 Get information about a deployed token.
 
 ```rust
@@ -532,39 +643,146 @@ pub fn get_token_info(
 ) -> Result<TokenInfo, Error>
 ```
 
+#### Multi-Signature Admin Operations
+
+Critical admin operations can be gated behind a configurable multi-sig approval system. A minimum number of authorized signers must approve a proposal before it executes.
+
+##### `configure_multisig`
+
+Set up the multi-sig system with a list of signers and an approval threshold (admin only).
+
+```rust
+pub fn configure_multisig(
+    env: Env,
+    admin: Address,
+    signers: Vec<Address>,
+    threshold: u32,
+) -> Result<(), Error>
+```
+
+##### `propose_multisig_action`
+
+Any authorized signer can create a proposal for an admin action.
+
+```rust
+pub fn propose_multisig_action(
+    env: Env,
+    proposer: Address,
+    action: MultiSigAction,  // TransferAdmin | UpdateFees | PauseContract | UnpauseContract
+    payload: Bytes,
+) -> Result<u64, Error>  // returns proposal ID
+```
+
+**Payload encoding:**
+
+| Action           | Payload                                                    |
+| ---------------- | ---------------------------------------------------------- |
+| `TransferAdmin`  | 32 bytes – new admin contract-id hash                      |
+| `UpdateFees`     | 32 bytes – base_fee (i128 LE, 16 B) \|\| metadata_fee (i128 LE, 16 B) |
+| `PauseContract`  | 0 bytes (empty)                                            |
+| `UnpauseContract`| 0 bytes (empty)                                            |
+
+##### `approve_multisig_proposal`
+
+Approve a pending proposal. Automatically executes when the threshold is reached.
+
+```rust
+pub fn approve_multisig_proposal(
+    env: Env,
+    approver: Address,
+    proposal_id: u64,
+) -> Result<(), Error>
+```
+
+##### `execute_multisig_proposal`
+
+Explicitly execute a proposal that has already reached the approval threshold.
+
+```rust
+pub fn execute_multisig_proposal(
+    env: Env,
+    executor: Address,
+    proposal_id: u64,
+) -> Result<(), Error>
+```
+
+##### `cancel_multisig_proposal`
+
+Cancel a pending proposal (admin or original proposer only).
+
+```rust
+pub fn cancel_multisig_proposal(
+    env: Env,
+    canceller: Address,
+    proposal_id: u64,
+) -> Result<(), Error>
+```
+
+##### `get_multisig_config`
+
+Returns the current multi-sig configuration, or `None` if not yet configured.
+
+```rust
+pub fn get_multisig_config(env: Env) -> Option<MultiSigConfig>
+```
+
+##### `get_multisig_proposal`
+
+Returns a proposal by ID, or `None` if it does not exist.
+
+```rust
+pub fn get_multisig_proposal(env: Env, proposal_id: u64) -> Option<MultiSigProposal>
+```
+
 #### Error Codes
 
-| Code | Error | Description |
-|------|-------|-------------|
-| 1 | `InsufficientFee` | Fee payment is below minimum |
-| 2 | `Unauthorized` | Caller not authorized for action |
-| 3 | `InvalidParameters` | Invalid token parameters |
-| 4 | `TokenNotFound` | Token not found in registry |
-| 5 | `MetadataAlreadySet` | Metadata already set for token |
-| 6 | `AlreadyInitialized` | Factory already initialized |
-| 7 | `BurnAmountExceedsBalance` | Burn amount exceeds token balance |
-| 8 | `BurnNotEnabled` | Burn functionality not enabled |
-| 9 | `InvalidBurnAmount` | Burn amount is zero or negative |
+| Code | Error                      | Description                                                  |
+| ---- | -------------------------- | ------------------------------------------------------------ |
+| 1    | `InsufficientFee`          | Fee payment is below minimum                                 |
+| 2    | `Unauthorized`             | Caller not authorized for action                             |
+| 3    | `InvalidParameters`        | Invalid token parameters                                     |
+| 4    | `TokenNotFound`            | Token not found in registry                                  |
+| 5    | `MetadataAlreadySet`       | Metadata already set for token                               |
+| 6    | `AlreadyInitialized`       | Factory already initialized                                  |
+| 7    | `BurnAmountExceedsBalance` | Burn amount exceeds token balance                            |
+| 8    | `BurnNotEnabled`           | Burn functionality not enabled                               |
+| 9    | `InvalidBurnAmount`        | Burn amount is zero or negative                              |
+| 54   | `MetadataNotSet`           | Metadata has never been set; call `set_token_metadata` first |
+
+##### Multi-Sig Error Codes
+
+| Code | Error                        | Description                                          |
+| ---- | ---------------------------- | ---------------------------------------------------- |
+| 72   | `MultiSigNotConfigured`      | Multi-sig has not been configured yet                |
+| 73   | `MultiSigProposalNotFound`   | No proposal with the given ID                        |
+| 74   | `MultiSigAlreadyApproved`    | Signer already approved this proposal                |
+| 75   | `MultiSigProposalExecuted`   | Proposal has already been executed                   |
+| 76   | `MultiSigProposalCancelled`  | Proposal has been cancelled                          |
+| 77   | `MultiSigThresholdNotMet`    | Not enough approvals to execute                      |
+| 78   | `NotASigner`                 | Caller is not in the authorized signer list          |
+| 79   | `InvalidThreshold`           | Threshold is 0 or exceeds the number of signers      |
 
 ##### Vault Error Codes
 
 These codes are reserved for vault lifecycle failures and are guaranteed to remain stable for downstream clients.
 
-| Code | Error | Description |
-|------|-------|-------------|
-| 60 | `VaultNotFound` | Referenced vault does not exist |
-| 61 | `VaultLocked` | Unlock time or milestone has not been met |
-| 62 | `VaultAlreadyClaimed` | Vault funds have already been claimed |
-| 63 | `VaultCancelled` | Vault was cancelled and is immutable |
-| 64 | `InvalidVaultConfig` | Vault parameters failed validation |
-| 65 | `NothingToClaim` | No claimable balance remains (vaults/streams) |
+| Code | Error                 | Description                                   |
+| ---- | --------------------- | --------------------------------------------- |
+| 60   | `VaultNotFound`       | Referenced vault does not exist               |
+| 61   | `VaultLocked`         | Unlock time or milestone has not been met     |
+| 62   | `VaultAlreadyClaimed` | Vault funds have already been claimed         |
+| 63   | `VaultCancelled`      | Vault was cancelled and is immutable          |
+| 64   | `InvalidVaultConfig`  | Vault parameters failed validation            |
+| 65   | `NothingToClaim`      | No claimable balance remains (vaults/streams) |
 
 #### Events
 
 ##### `TokenBurned`
+
 Emitted when tokens are burned.
 
 **Data:**
+
 - `token_address`: Address
 - `from`: Address
 - `amount`: i128
@@ -605,10 +823,14 @@ Handles all Stellar network interactions.
 
 ```typescript
 class StellarService {
-  constructor(network: 'testnet' | 'mainnet');
-  
+  constructor(network: "testnet" | "mainnet");
+
   async deployToken(params: TokenDeployParams): Promise<DeploymentResult>;
-  async mintTokens(tokenAddress: string, recipient: string, amount: string): Promise<string>;
+  async mintTokens(
+    tokenAddress: string,
+    recipient: string,
+    amount: string,
+  ): Promise<string>;
   async getTokenInfo(tokenAddress: string): Promise<TokenInfo>;
   async getTransaction(hash: string): Promise<TransactionDetails>;
 }
@@ -634,7 +856,11 @@ Handles metadata upload to IPFS.
 
 ```typescript
 class IPFSService {
-  async uploadMetadata(image: File, description: string, tokenName: string): Promise<string>;
+  async uploadMetadata(
+    image: File,
+    description: string,
+    tokenName: string,
+  ): Promise<string>;
   async getMetadata(uri: string): Promise<TokenMetadata>;
 }
 ```
@@ -647,11 +873,11 @@ Manages wallet connection state.
 
 ```typescript
 const {
-  wallet,        // WalletState
-  connect,       // () => Promise<void>
-  disconnect,    // () => void
-  isConnecting,  // boolean
-  error          // string | null
+  wallet, // WalletState
+  connect, // () => Promise<void>
+  disconnect, // () => void
+  isConnecting, // boolean
+  error, // string | null
 } = useWallet();
 ```
 
@@ -661,10 +887,10 @@ Manages token deployment process.
 
 ```typescript
 const {
-  deploy,        // (params: TokenDeployParams) => Promise<DeploymentResult>
-  isDeploying,   // boolean
-  status,        // DeploymentStatus
-  error          // AppError | null
+  deploy, // (params: TokenDeployParams) => Promise<DeploymentResult>
+  isDeploying, // boolean
+  status, // DeploymentStatus
+  error, // AppError | null
 } = useTokenDeploy();
 ```
 
@@ -674,11 +900,11 @@ Manages toast notifications.
 
 ```typescript
 const {
-  toasts,        // ToastState[]
-  success,       // (message: string) => void
-  error,         // (message: string) => void
-  info,          // (message: string) => void
-  warning        // (message: string) => void
+  toasts, // ToastState[]
+  success, // (message: string) => void
+  error, // (message: string) => void
+  info, // (message: string) => void
+  warning, // (message: string) => void
 } = useToast();
 ```
 
@@ -752,6 +978,7 @@ cargo test -- --nocapture  # Run with output
 ### Test Categories
 
 #### Unit Tests
+
 Tests individual functions and modules in isolation.
 
 ```bash
@@ -759,6 +986,7 @@ cargo test --lib --tests
 ```
 
 #### Integration Tests
+
 Tests interactions between components.
 
 ```bash
@@ -766,7 +994,9 @@ cargo test --test '*'
 ```
 
 #### Property-Based Tests
+
 Randomized testing for governance invariants:
+
 - Monotonic vote totals
 - Single-vote-per-address
 - Execution preconditions
@@ -778,23 +1008,36 @@ cargo test --lib --profile ci
 ```
 
 #### Benchmarks
+
 Performance testing (nightly mode only).
 
 ```bash
 cargo bench --no-run
 ```
 
+#### Frontend Performance Monitoring
+
+The frontend performance pipeline records bundle and Lighthouse metrics locally and can optionally publish sanitized custom events to New Relic.
+
+```bash
+cd frontend
+npm run monitor
+```
+
+To enable the New Relic export path, set `NEW_RELIC_ACCOUNT_ID` and `NEW_RELIC_INSERT_KEY` before running the command. Optional overrides include `NEW_RELIC_INSIGHTS_URL`, `NEW_RELIC_APP_NAME`, and `NEW_RELIC_SOURCE`.
+
 ### Test Modes
 
-| Mode | Duration | Tests | Use Case |
-|------|----------|-------|----------|
-| **Fast** | 2-5 min | Unit + Integration | Local dev, pre-commit |
-| **Full** | 10-15 min | + Property tests | PR validation, CI |
-| **Nightly** | 30-60 min | + Benchmarks + WASM | Release validation |
+| Mode        | Duration  | Tests               | Use Case              |
+| ----------- | --------- | ------------------- | --------------------- |
+| **Fast**    | 2-5 min   | Unit + Integration  | Local dev, pre-commit |
+| **Full**    | 10-15 min | + Property tests    | PR validation, CI     |
+| **Nightly** | 30-60 min | + Benchmarks + WASM | Release validation    |
 
 ### CI Integration
 
 Tests run automatically on:
+
 - **Push**: Fast mode
 - **Pull Request**: Full mode
 - **Schedule**: Nightly mode (2 AM UTC)
@@ -844,6 +1087,8 @@ Enable pre-commit hooks to catch issues before committing:
 ```bash
 git config core.hooksPath .githooks
 ```
+
+The hook checks Rust formatting, frontend/backend lint, type-checking, Prettier formatting, secret detection, and conventional commit message format — scoped to staged files only for speed.
 
 For more details, see [CI/CD Guide](CI_CD_GUIDE.md).
 
@@ -938,19 +1183,19 @@ Edit `frontend/src/config/stellar.ts`:
 
 ```typescript
 export const STELLAR_CONFIG = {
-  network: import.meta.env.VITE_NETWORK || 'testnet',
-  factoryContractId: import.meta.env.VITE_FACTORY_CONTRACT_ID || '',
-  
+  network: import.meta.env.VITE_NETWORK || "testnet",
+  factoryContractId: import.meta.env.VITE_FACTORY_CONTRACT_ID || "",
+
   testnet: {
-    networkPassphrase: 'Test SDF Network ; September 2015',
-    horizonUrl: 'https://horizon-testnet.stellar.org',
-    sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
+    networkPassphrase: "Test SDF Network ; September 2015",
+    horizonUrl: "https://horizon-testnet.stellar.org",
+    sorobanRpcUrl: "https://soroban-testnet.stellar.org",
   },
-  
+
   mainnet: {
-    networkPassphrase: 'Public Global Stellar Network ; September 2015',
-    horizonUrl: 'https://horizon.stellar.org',
-    sorobanRpcUrl: 'https://soroban-mainnet.stellar.org',
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    horizonUrl: "https://horizon.stellar.org",
+    sorobanRpcUrl: "https://soroban-mainnet.stellar.org",
   },
 };
 ```
@@ -961,10 +1206,10 @@ Edit `frontend/src/config/ipfs.ts`:
 
 ```typescript
 export const IPFS_CONFIG = {
-  apiKey: import.meta.env.VITE_IPFS_API_KEY || '',
-  apiSecret: import.meta.env.VITE_IPFS_API_SECRET || '',
-  pinataApiUrl: 'https://api.pinata.cloud',
-  pinataGateway: 'https://gateway.pinata.cloud/ipfs',
+  apiKey: import.meta.env.VITE_IPFS_API_KEY || "",
+  apiSecret: import.meta.env.VITE_IPFS_API_SECRET || "",
+  pinataApiUrl: "https://api.pinata.cloud",
+  pinataGateway: "https://gateway.pinata.cloud/ipfs",
 };
 ```
 
@@ -972,11 +1217,11 @@ export const IPFS_CONFIG = {
 
 Default fees (in stroops, 1 XLM = 10,000,000 stroops):
 
-| Tier | Features | Fee (XLM) | Fee (stroops) |
-|------|----------|-----------|---------------|
-| Basic | Token deployment | 7 | 70,000,000 |
-| Metadata | + IPFS metadata | +3 | +30,000,000 |
-| Total | With metadata | 10 | 100,000,000 |
+| Tier     | Features         | Fee (XLM) | Fee (stroops) |
+| -------- | ---------------- | --------- | ------------- |
+| Basic    | Token deployment | 7         | 70,000,000    |
+| Metadata | + IPFS metadata  | +3        | +30,000,000   |
+| Total    | With metadata    | 10        | 100,000,000   |
 
 Fees can be updated by factory admin using `update_fees` function.
 
@@ -991,6 +1236,7 @@ Currently, all interactions are direct with the blockchain via Stellar SDK.
 ### GraphQL API (Planned)
 
 Future versions will include a GraphQL API for:
+
 - Token discovery
 - Analytics
 - User profiles
@@ -1080,7 +1326,7 @@ chore: build/tooling changes
 ### Phase 4: Pro Features (Q4 2026)
 
 - [ ] Clawback functionality
-- [ ] Multi-sig support
+- [x] Multi-sig support
 - [ ] Advanced token management
 - [ ] API access
 - [ ] White-label solutions
@@ -1112,4 +1358,3 @@ A: Base deployment is 7 XLM, with an additional 3 XLM for metadata.
 
 **Q: Which networks are supported?**  
 A: Both Stellar testnet (for testing) and mainnet (for production).
-

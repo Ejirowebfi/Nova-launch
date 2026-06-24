@@ -55,13 +55,22 @@ export function validateEnv(): BackendEnv {
     );
   }
 
-  const databaseUrl = process.env.DATABASE_URL || '';
-  if (!databaseUrl) {
+  const databaseUrl =
+    process.env.DATABASE_URL ||
+    (isProduction
+      ? ''
+      : 'postgresql://postgres:postgres@localhost:5432/postgres?schema=public');
+  if (isProduction && !databaseUrl) {
     throw new Error('DATABASE_URL is required.');
   }
 
-  const jwtSecret = process.env.JWT_SECRET || '';
-  if (isProduction && (!jwtSecret || jwtSecret === 'your-secret-key-change-in-production')) {
+  const jwtSecret =
+    process.env.JWT_SECRET ||
+    (isProduction ? '' : 'dev-secret-key-change-me');
+  if (
+    isProduction &&
+    (!jwtSecret || jwtSecret === 'your-secret-key-change-in-production')
+  ) {
     throw new Error('JWT_SECRET must be set to a secure value in production.');
   }
 

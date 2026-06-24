@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { IPFSService } from '../IPFSService';
+import { IPFSService, _clearMetadataCache, _resetLastKnownGoodGateway } from '../IPFSService';
 import type { TokenMetadata } from '../../types';
 
 global.fetch = vi.fn();
@@ -9,6 +9,8 @@ describe('IPFSService', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        _clearMetadataCache();
+        _resetLastKnownGoodGateway();
         service = new IPFSService();
     });
 
@@ -37,7 +39,9 @@ describe('IPFSService', () => {
         it('throws error when upload fails', async () => {
             (global.fetch as any).mockResolvedValueOnce({
                 ok: false,
+                status: 401,
                 statusText: 'Unauthorized',
+                text: async () => 'Unauthorized',
             });
 
             const image = new File(['image'], 'test.png', { type: 'image/png' });
@@ -58,7 +62,7 @@ describe('IPFSService', () => {
                     ok: true,
                     json: async () => ({ IpfsHash: mockImageHash }),
                 })
-                .mockImplementationOnce(async (url: string, options: any) => {
+                .mockImplementationOnce(async (_url: string, options: any) => {
                     const formData = options.body as FormData;
                     const file = formData.get('file') as File;
                     const text = await file.text();
@@ -94,7 +98,7 @@ describe('IPFSService', () => {
                 json: async () => mockMetadata,
             });
 
-            const result = await service.getMetadata('ipfs://QmMetadataHash');
+            const result = await service.getMetadata('ipfs://QmMetadataHash1');
 
             expect(result).toEqual(mockMetadata);
         });
@@ -113,7 +117,7 @@ describe('IPFSService', () => {
                     json: async () => mockMetadata,
                 });
 
-            const result = await service.getMetadata('ipfs://QmMetadataHash');
+            const result = await service.getMetadata('ipfs://QmMetadataHash2');
 
             expect(result).toEqual(mockMetadata);
             expect(global.fetch).toHaveBeenCalledTimes(2);
@@ -122,7 +126,7 @@ describe('IPFSService', () => {
         it('throws error when all gateways fail', async () => {
             (global.fetch as any).mockRejectedValue(new Error('Network error'));
 
-            await expect(service.getMetadata('ipfs://QmMetadataHash')).rejects.toThrow(
+            await expect(service.getMetadata('ipfs://QmMetadataHash3')).rejects.toThrow(
                 'Failed to fetch metadata from all gateways'
             );
         });
@@ -130,10 +134,10 @@ describe('IPFSService', () => {
         it('validates metadata structure', async () => {
             (global.fetch as any).mockResolvedValueOnce({
                 ok: true,
-                json: async () => ({ name: 'Test' }),
+                json: async () => ({ name: 'Test' }), // missing description and image
             });
 
-            await expect(service.getMetadata('ipfs://QmMetadataHash')).rejects.toThrow();
+            await expect(service.getMetadata('ipfs://QmMetadataHash4')).rejects.toThrow();
         });
 
         it('caches metadata after first fetch', async () => {
@@ -148,7 +152,7 @@ describe('IPFSService', () => {
                 json: async () => mockMetadata,
             });
 
-            const uri = 'ipfs://QmMetadataHash';
+            const uri = 'ipfs://QmMetadataHash5';
             await service.getMetadata(uri);
             const cachedResult = await service.getMetadata(uri);
 

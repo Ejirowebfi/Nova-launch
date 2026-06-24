@@ -15,10 +15,10 @@ jobs:
         working-directory: ./frontend
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -38,7 +38,7 @@ jobs:
           LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
       
       - name: Upload Lighthouse results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: lighthouse-results
@@ -53,10 +53,10 @@ jobs:
         working-directory: ./frontend
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -72,7 +72,7 @@ jobs:
         run: node scripts/analyze-bundle.js
       
       - name: Upload bundle analysis
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: bundle-analysis
           path: frontend/bundle-analysis.json
@@ -116,10 +116,10 @@ jobs:
         working-directory: ./frontend
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -132,7 +132,7 @@ jobs:
         run: npm run test:performance
       
       - name: Upload test results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: performance-test-results
@@ -149,12 +149,12 @@ jobs:
         working-directory: ./frontend
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -164,7 +164,7 @@ jobs:
         run: npm ci
       
       - name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           path: frontend/artifacts
       

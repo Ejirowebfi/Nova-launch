@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Router } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -7,17 +7,30 @@ import { corsOptions } from "./config/cors";
 import { validateEnv } from "./config/env";
 import { runStartupValidation } from "./config/startupValidation";
 import adminRoutes from "./routes/admin";
+import analyticsRoutes from "./routes/analytics";
 import leaderboardRoutes from "./routes/leaderboard";
 import tokenRoutes from "./routes/tokens";
+import dividendRoutes from "./routes/dividends";
 import statsRoutes from "./routes/stats";
 import governanceRoutes from "./routes/governance";
 import campaignRoutes from "./routes/campaigns";
 import streamRoutes from "./routes/streams";
 import vaultRoutes from "./routes/vaults";
+import versionRoutes from "./routes/version";
+import searchRoutes from "./routes/search";
+import exportRoutes from "./routes/export";
+import graphqlRouter, { attachGraphqlSubscriptions } from "./graphql";
+import openApiRouter from "./lib/openapi/router";
 import { Database } from "./config/database";
 import { successResponse, errorResponse } from "./utils/response";
 import { requestLoggingMiddleware } from "./middleware/request-logging.middleware";
+import { createTimeoutMiddleware } from "./middleware/timeout";
+import { createQueryTimeoutMiddleware } from "./middleware/queryTimeout";
+import { createMetricsMiddleware, metricsRegistry } from "./lib/metrics";
+import { registerPoolMetrics } from "./lib/metrics/poolMetrics";
+import { prisma } from "./lib/prisma";
 import stellarEventListener from "./services/stellarEventListener";
+import websocketService from "./services/websocket";
 
 dotenv.config();
 
@@ -31,6 +44,15 @@ const PORT = env.PORT;
 // Request logging middleware (first to capture all requests)
 app.use(requestLoggingMiddleware);
 
+// Request timeout — responds 503 if a handler takes too long
+app.use(createTimeoutMiddleware());
+
+// Attach default DB query timeout to res.locals for downstream handlers
+app.use(createQueryTimeoutMiddleware());
+
+// Prometheus metrics middleware — records HTTP request duration and counts
+app.use(createMetricsMiddleware());
+
 // Security middleware
 app.use(helmet());
 app.use(cors(corsOptions));
@@ -42,61 +64,132 @@ const limiter = rateLimit({
   message: "Too many requests from this IP, please try again later.",
 });
 
-app.use("/api/admin", limiter);
-app.use("/api/leaderboard", limiter);
-app.use("/api/tokens", limiter);
-app.use("/api/stats", limiter);
-app.use("/api/governance", limiter);
-app.use("/api/campaigns", limiter);
-app.use("/api/streams", limiter);
-app.use("/api/vaults", limiter);
-
 // Body parsing middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Initialize database
+// Initialize database and pool metrics
 Database.initialize();
+registerPoolMetrics(prisma);
 
-// Routes
-app.use("/api/admin", adminRoutes);
-app.use("/api/leaderboard", leaderboardRoutes);
-app.use("/api/tokens", tokenRoutes);
-app.use("/api/stats", statsRoutes);
-app.use("/api/governance", governanceRoutes);
-app.use("/api/campaigns", campaignRoutes);
-app.use("/api/streams", streamRoutes);
-app.use("/api/vaults", vaultRoutes);
+// ---------------------------------------------------------------------------
+// Versioned API router (v1)
+//
+// All routes live under /api/v1/<resource>.  A backward-compat alias mounts
+// the same router at /api/<resource> so existing clients continue to work.
+//
+// The X-API-Version response header tells clients which version served them.
+// ---------------------------------------------------------------------------
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json(
-    successResponse({
-      status: "ok",
-      uptime: process.uptime(),
-    })
-  );
+const v1Router = Router();
+
+// Version header on every v1 response
+v1Router.use((_req, res, next) => {
+  res.setHeader("X-API-Version", "v1");
+  next();
 });
 
-// Error handling middleware
+v1Router.use("/admin", limiter, adminRoutes);
+v1Router.use("/analytics", limiter, analyticsRoutes);
+v1Router.use("/leaderboard", limiter, leaderboardRoutes);
+v1Router.use("/tokens", limiter, tokenRoutes);
+v1Router.use("/dividends", limiter, dividendRoutes);
+v1Router.use("/stats", limiter, statsRoutes);
+v1Router.use("/governance", limiter, governanceRoutes);
+v1Router.use("/campaigns", limiter, campaignRoutes);
+v1Router.use("/streams", limiter, streamRoutes);
+v1Router.use("/vaults", limiter, vaultRoutes);
+v1Router.use("/version", versionRoutes);
+v1Router.use("/search", searchRoutes);
+v1Router.use("/export", exportRoutes);
+v1Router.use("/graphql", graphqlRouter);
+v1Router.use("/docs", openApiRouter);
+
+// Canonical versioned mount
+app.use("/api/v1", v1Router);
+
+// Backward-compatibility alias — clients targeting /api/<resource> continue to work
+app.use("/api", v1Router);
+
+import { healthService } from "./lib/health/health.service";
+import { isAppError, toAppError } from "./lib/errors";
+import { getCorrelationId, getTransactionId } from "./lib/async-context";
+
+// Health check — liveness (is the process alive?)
+app.get("/health/live", (_req, res) => {
+  res.json(successResponse({ status: "ok", uptime: process.uptime() }));
+});
+
+// Health check — readiness (are all dependencies reachable?)
+app.get("/health/ready", async (_req, res) => {
+  const result = await healthService.checkHealth();
+  const httpStatus =
+    result.status === "healthy"
+      ? 200
+      : result.status === "degraded"
+        ? 207
+        : 503;
+  res.status(httpStatus).json(successResponse(result));
+});
+
+// Legacy /health — kept for backwards compatibility, maps to readiness
+app.get("/health", async (_req, res) => {
+  const result = await healthService.checkHealth();
+  const httpStatus =
+    result.status === "healthy"
+      ? 200
+      : result.status === "degraded"
+        ? 207
+        : 503;
+  res.status(httpStatus).json(successResponse(result));
+});
+
+/**
+ * GET /metrics
+ * Prometheus metrics endpoint — scraped by Prometheus every 15 s.
+ *
+ * Security: restrict to internal network in production (e.g. via nginx
+ * allow/deny or a network policy). The endpoint is intentionally unauthenticated
+ * so Prometheus can scrape it without credentials.
+ *
+ * Disable by setting METRICS_ENABLED=false.
+ */
+if (process.env.METRICS_ENABLED !== "false") {
+  app.get("/metrics", async (_req, res) => {
+    try {
+      res.set("Content-Type", metricsRegistry.contentType);
+      res.end(await metricsRegistry.metrics());
+    } catch (err) {
+      res.status(500).end(String(err));
+    }
+  });
+}
+
+// Error handling middleware — uses AppError framework for typed, consistent responses
 app.use(
   (
-    err: any,
+    err: unknown,
     req: express.Request,
     res: express.Response,
-    next: express.NextFunction
+    _next: express.NextFunction
   ) => {
-    console.error("Error:", err);
-    res.status(err.status || 500).json(
-      errorResponse({
-        code: "INTERNAL_SERVER_ERROR",
-        message: err.message || "Internal server error",
-        details:
-          process.env.NODE_ENV === "development"
-            ? { stack: err.stack }
-            : undefined,
-      })
-    );
+    const appErr = toAppError(err);
+    const isDev = process.env.NODE_ENV === "development";
+    const correlationId = getCorrelationId() ?? (req as any).correlationId;
+    const transactionId = getTransactionId() ?? (req as any).transactionId;
+
+    if (appErr.httpStatus >= 500) {
+      console.error("Error:", err);
+    }
+
+    const body = appErr.toHttpResponse(isDev);
+    if (correlationId) {
+      (body as any).correlationId = correlationId;
+    }
+    if (transactionId) {
+      (body as any).transactionId = transactionId;
+    }
+    res.status(appErr.httpStatus).json(body);
   }
 );
 
@@ -110,9 +203,41 @@ app.use((req, res) => {
   );
 });
 
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`🚀 Admin API server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || "development"}`);
+
+  // Register job handlers
+  jobQueue.register("stream_reconciliation", async (job) => {
+    const result = await streamReconciliationService.reconcile();
+    if (result.divergences.length > 0) {
+      console.warn(
+        `Stream reconciliation found ${result.divergences.length} divergences`
+      );
+    }
+  });
+
+  // Start job queue
+  jobQueue.start();
+
+  // Schedule periodic stream reconciliation if enabled
+  if (process.env.ENABLE_STREAM_RECONCILIATION === "true") {
+    const reconciliationInterval = parseInt(
+      process.env.STREAM_RECONCILIATION_INTERVAL_MS || "3600000"
+    );
+    setInterval(() => {
+      jobQueue.enqueue("stream_reconciliation", {}, {});
+    }, reconciliationInterval);
+    console.log(
+      `📋 Stream reconciliation scheduled every ${reconciliationInterval}ms`
+    );
+  }
+
+  // Attach WebSocket server for live event streaming
+  websocketService.attach(server);
+
+  // Attach GraphQL subscriptions (graphql-ws) on the /graphql WS path
+  attachGraphqlSubscriptions(server);
 
   // Start event listener only after server (and DB) are ready
   if (process.env.ENABLE_EVENT_LISTENER === "true") {

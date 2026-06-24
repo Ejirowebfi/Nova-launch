@@ -1,24 +1,42 @@
-import { IPFS_CONFIG } from '../config/ipfs';
+import { IPFS_CONFIG, IPFS_GATEWAYS, IPFS_GATEWAY_TIMEOUT_MS } from '../config/ipfs';
 import type { TokenMetadata } from '../types';
-
-const GATEWAYS = [
-    IPFS_CONFIG.pinataGateway,
-    'https://ipfs.io/ipfs',
-    'https://cloudflare-ipfs.com/ipfs',
-];
+import { validateMetadataSchema } from './metadataSchema';
 
 const metadataCache = new Map<string, TokenMetadata>();
 
+/** Index of the last gateway that successfully served a request. */
+let lastKnownGoodIndex = 0;
+
 /** Exposed for testing only */
 export function _clearMetadataCache() { metadataCache.clear(); }
+export function _resetLastKnownGoodGateway() { lastKnownGoodIndex = 0; }
+
+/**
+ * Build an ordered gateway list that starts from the last-known-good gateway
+ * so subsequent requests skip already-failed gateways.
+ */
+function orderedGateways(gateways: readonly string[]): Array<{ gateway: string; index: number }> {
+    return gateways.map((gateway, index) => ({ gateway, index })).sort((a, b) => {
+        if (a.index === lastKnownGoodIndex) return -1;
+        if (b.index === lastKnownGoodIndex) return 1;
+        return a.index - b.index;
+    });
+}
 
 export class IPFSService {
     private apiKey: string;
     private apiSecret: string;
+    private gateways: readonly string[];
+    private gatewayTimeoutMs: number;
 
-    constructor() {
+    constructor(
+        gateways: readonly string[] = IPFS_GATEWAYS,
+        gatewayTimeoutMs: number = IPFS_GATEWAY_TIMEOUT_MS,
+    ) {
         this.apiKey = IPFS_CONFIG.apiKey;
         this.apiSecret = IPFS_CONFIG.apiSecret;
+        this.gateways = gateways;
+        this.gatewayTimeoutMs = gatewayTimeoutMs;
     }
 
     async uploadMetadata(
@@ -39,6 +57,11 @@ export class IPFSService {
             image: imageUri,
         };
 
+        const validation = validateMetadataSchema(metadata);
+        if (!validation.valid) {
+            throw new Error(`Metadata schema validation failed: ${validation.errors.join('; ')}`);
+        }
+
         const metadataBlob = new Blob([JSON.stringify(metadata)], {
             type: 'application/json',
         });
@@ -54,21 +77,24 @@ export class IPFSService {
         }
 
         const hash = uri.replace('ipfs://', '');
-        
-        for (const gateway of GATEWAYS) {
+        const ordered = orderedGateways(this.gateways);
+
+        for (const { gateway, index } of ordered) {
             try {
                 const url = `${gateway}/${hash}`;
-                const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-                
+                const response = await fetch(url, { signal: AbortSignal.timeout(this.gatewayTimeoutMs) });
+
                 if (!response.ok) continue;
 
                 const metadata = await response.json() as TokenMetadata;
-                
+
                 if (!metadata.name || !metadata.description || !metadata.image) {
                     throw new Error('Invalid metadata structure');
                 }
 
+                // Cache the result and remember this gateway for next time
                 metadataCache.set(uri, metadata);
+                lastKnownGoodIndex = index;
                 return metadata;
             } catch {
                 continue;
@@ -82,21 +108,33 @@ export class IPFSService {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch(`${IPFS_CONFIG.pinataApiUrl}/pinning/pinFileToIPFS`, {
-            method: 'POST',
-            headers: {
-                pinata_api_key: this.apiKey,
-                pinata_secret_api_key: this.apiSecret,
-            },
-            body: formData,
-        });
+        try {
+            const response = await fetch(`${IPFS_CONFIG.pinataApiUrl}/pinning/pinFileToIPFS`, {
+                method: 'POST',
+                headers: {
+                    pinata_api_key: this.apiKey,
+                    pinata_secret_api_key: this.apiSecret,
+                },
+                body: formData,
+                signal: AbortSignal.timeout(30000), // 30s timeout for uploads
+            });
 
-        if (!response.ok) {
-            throw new Error(`IPFS upload failed: ${response.statusText}`);
+            if (!response.ok) {
+                const errorText = await response.text().catch(() => 'Unknown error');
+                throw new Error(`IPFS upload failed (${response.status}): ${errorText || response.statusText}`);
+            }
+
+            const data = await response.json();
+            if (!data.IpfsHash) {
+                throw new Error('IPFS upload succeeded but no hash was returned');
+            }
+            return data.IpfsHash;
+        } catch (error) {
+            if (error instanceof Error && error.name === 'TimeoutError') {
+                throw new Error('IPFS upload timed out. Please check your connection and try again.');
+            }
+            throw error;
         }
-
-        const data = await response.json();
-        return data.IpfsHash;
     }
 
     async uploadImage(file: File): Promise<string> {

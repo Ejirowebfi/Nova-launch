@@ -55,6 +55,10 @@ export interface ProposalParams {
   status?: string;
   /** Creator filter */
   creator?: string;
+  /** Lower bound for proposal creation time */
+  startDate?: string;
+  /** Upper bound for proposal creation time */
+  endDate?: string;
   /** Page number (1-based) */
   page?: number;
   /** Items per page */
@@ -151,6 +155,8 @@ export async function fetchProposals(params: ProposalParams = {}): Promise<Propo
   
   if (params.status) queryParams.append('status', params.status);
   if (params.creator) queryParams.append('creator', params.creator);
+  if (params.startDate) queryParams.append('startDate', params.startDate);
+  if (params.endDate) queryParams.append('endDate', params.endDate);
   if (params.page) queryParams.append('page', params.page.toString());
   if (params.limit) queryParams.append('limit', params.limit.toString());
   if (params.sortBy) queryParams.append('sortBy', params.sortBy);

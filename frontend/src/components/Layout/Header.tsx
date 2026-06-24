@@ -1,8 +1,7 @@
-import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import type { ReactNode } from 'react';
 
 interface HeaderProps {
-    children?: React.ReactNode;
+    children?: ReactNode;
 }
 
 export function Header({ children }: HeaderProps) {
@@ -28,12 +27,11 @@ export function Header({ children }: HeaderProps) {
 }
 
 function NavLink({ to, label }: { to: string; label: string }) {
-    const location = useLocation();
-    const isActive = location.pathname === to;
+    const isActive = typeof window !== 'undefined' && window.location.pathname === to;
     
     return (
-        <Link
-            to={to}
+        <a
+            href={to}
             className={`px-3 py-2 text-sm font-medium rounded-md transition ${
                 isActive 
                 ? 'bg-blue-50 text-blue-700' 
@@ -41,6 +39,6 @@ function NavLink({ to, label }: { to: string; label: string }) {
             }`}
         >
             {label}
-        </Link>
+        </a>
     );
 }

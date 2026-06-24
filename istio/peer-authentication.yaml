@@ -1,0 +1,31 @@
+# PeerAuthentication — enforce STRICT mTLS for all workloads in the namespace.
+#
+# STRICT mode means:
+#   - All inbound connections MUST present a valid Istio-issued certificate.
+#   - Plain-text connections are rejected.
+#   - Combined with DestinationRule ISTIO_MUTUAL, this gives end-to-end mTLS
+#     for all service-to-service communication inside the mesh.
+#
+# Redis is excluded via a workload-specific policy (PERMISSIVE) because it
+# does not support TLS natively.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: nova-launch
+spec:
+  mtls:
+    mode: STRICT
+---
+# Redis workload exemption — allow plain TCP connections
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: redis-permissive
+  namespace: nova-launch
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  mtls:
+    mode: PERMISSIVE

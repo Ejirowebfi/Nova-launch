@@ -5,7 +5,7 @@
  * Issue: #617 - Add Governance Read Integration to Frontend Dashboard
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Card } from '../UI/Card';
 import { Spinner } from '../UI/Spinner';
 import { Button } from '../UI/Button';
@@ -17,7 +17,7 @@ import {
 import type { GovernanceProposal, ProposalStatus } from '../../types';
 
 export interface ProposalListProps {
-    /** Filter by status */
+    /** Props for the proposal list; date filters are controlled inside the component. */
     status?: ProposalStatus;
     /** Filter by creator */
     creator?: string;
@@ -80,6 +80,11 @@ function getTimeRemaining(endsAt: number): string {
     return `${minutes}m left`;
 }
 
+function toIsoDate(value: string, endOfDay = false): string {
+    const suffix = endOfDay ? 'T23:59:59.999Z' : 'T00:00:00.000Z';
+    return new Date(`${value}${suffix}`).toISOString();
+}
+
 export function ProposalList({
     status,
     creator,
@@ -92,11 +97,28 @@ export function ProposalList({
     const [currentPage, setCurrentPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
     const [statusFilter, setStatusFilter] = useState<ProposalStatus | ''>(status || '');
+    const [startDate, setStartDate] = useState('');
+    const [endDate, setEndDate] = useState('');
+    const dateRangeRef = useRef({ startDate: '', endDate: '' });
+    const previousDateRangeRef = useRef({ startDate: '', endDate: '' });
+    const dateFetchTimeoutRef = useRef<number | null>(null);
+
+    useEffect(() => {
+        dateRangeRef.current = { startDate, endDate };
+    }, [startDate, endDate]);
+
+    const clearDateFetchTimeout = useCallback(() => {
+        if (dateFetchTimeoutRef.current !== null) {
+            window.clearTimeout(dateFetchTimeoutRef.current);
+            dateFetchTimeoutRef.current = null;
+        }
+    }, []);
 
     /**
      * Fetch proposals from backend
      */
-    const fetchData = useCallback(async (page: number) => {
+    const fetchData = useCallback(async (page: number, dateRange = dateRangeRef.current) => {
+        clearDateFetchTimeout();
         setLoading(true);
         setError(null);
 
@@ -114,6 +136,12 @@ export function ProposalList({
             if (creator) {
                 params.creator = creator;
             }
+            if (dateRange.startDate) {
+                params.startDate = toIsoDate(dateRange.startDate);
+            }
+            if (dateRange.endDate) {
+                params.endDate = toIsoDate(dateRange.endDate, true);
+            }
 
             const response = await fetchProposals(params);
             setProposals(response.proposals);
@@ -124,12 +152,31 @@ export function ProposalList({
         } finally {
             setLoading(false);
         }
-    }, [statusFilter, creator, limit]);
+    }, [statusFilter, creator, limit, clearDateFetchTimeout]);
 
     // Fetch on filter change
     useEffect(() => {
         fetchData(1);
     }, [fetchData]);
+
+    useEffect(() => {
+        if (
+            previousDateRangeRef.current.startDate === startDate &&
+            previousDateRangeRef.current.endDate === endDate
+        ) {
+            return;
+        }
+
+        previousDateRangeRef.current = { startDate, endDate };
+
+        clearDateFetchTimeout();
+
+        dateFetchTimeoutRef.current = window.setTimeout(() => {
+            fetchData(1);
+        }, 400);
+
+        return () => clearDateFetchTimeout();
+    }, [startDate, endDate, fetchData, clearDateFetchTimeout]);
 
     /**
      * Handle page change
@@ -143,6 +190,11 @@ export function ProposalList({
      */
     const handleProposalClick = (proposal: GovernanceProposal) => {
         onProposalSelect?.(proposal);
+    };
+
+    const handleClearDates = () => {
+        setStartDate('');
+        setEndDate('');
     };
 
     return (
@@ -164,6 +216,36 @@ export function ProposalList({
                         {opt.label}
                     </button>
                 ))}
+            </div>
+
+            {/* Date filters */}
+            <div className="grid gap-3 mb-4 md:grid-cols-[repeat(3,minmax(0,12rem))] items-end">
+                <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 mb-1">From</span>
+                    <input
+                        type="date"
+                        value={startDate}
+                        onChange={(event) => setStartDate(event.target.value)}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                </label>
+                <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 mb-1">To</span>
+                    <input
+                        type="date"
+                        value={endDate}
+                        onChange={(event) => setEndDate(event.target.value)}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                </label>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleClearDates}
+                    disabled={!startDate && !endDate}
+                >
+                    Clear dates
+                </Button>
             </div>
 
             {/* Loading state */}

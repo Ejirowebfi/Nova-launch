@@ -1,0 +1,33 @@
+# Istio IngressGateway — single entry point for external traffic.
+#
+# Routes:
+#   /*          → frontend (SPA)
+#   /api/*      → gateway  (rate-limited, authenticated)
+#   /health*    → backend  (liveness/readiness probes, no auth)
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: nova-launch-gateway
+  namespace: nova-launch
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+      # Redirect HTTP → HTTPS in production; remove for local dev
+      tls:
+        httpsRedirect: false
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        - "*"
+      tls:
+        mode: SIMPLE
+        credentialName: nova-launch-tls  # kubectl create secret tls nova-launch-tls ...

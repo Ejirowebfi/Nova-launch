@@ -5,11 +5,13 @@ const NETWORK_CONFIGS = {
     networkPassphrase: 'Test SDF Network ; September 2015',
     horizonUrl: 'https://horizon-testnet.stellar.org',
     sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
+    explorerBaseUrl: 'https://stellar.expert/explorer/testnet',
   },
   mainnet: {
     networkPassphrase: 'Public Global Stellar Network ; September 2015',
     horizonUrl: 'https://horizon.stellar.org',
     sorobanRpcUrl: 'https://soroban-mainnet.stellar.org',
+    explorerBaseUrl: 'https://stellar.expert/explorer/public',
   },
 } as const;
 
@@ -44,6 +46,9 @@ export const STELLAR_CONFIG = {
   factoryContractId: ENV.FACTORY_CONTRACT_ID,
   ...NETWORK_CONFIGS[ENV.NETWORK],
 } as const;
+
+/** The active network as a plain string — useful for runtime mismatch checks. */
+export const ACTIVE_NETWORK: 'testnet' | 'mainnet' = ENV.NETWORK;
 
 /**
  * Returns the network config for the active network.

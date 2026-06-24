@@ -22,6 +22,8 @@ import { mappers } from '../contracts/mappers';
 import { WalletService } from './wallet';
 import type { ProposalParams, VoteParams } from '../types/governance';
 import type { OnChainBuybackCampaign } from '../types/campaign';
+import { decodeSimulationError } from './stellarErrors';
+import { SequenceNumberCache } from './sequenceNumberCache';
 
 export interface TransactionDetails {
   hash: string;
@@ -34,6 +36,11 @@ export interface TestAccount {
   publicKey: string;
   secretKey: string;
 }
+
+/** Typed result for account lookups — avoids unhandled throws on missing/merged accounts. */
+export type AccountLookupResult =
+  | { found: true; account: any }
+  | { found: false; reason: 'missing' | 'error'; error?: string };
 
 export interface TokenDeploymentParams {
   name: string;
@@ -57,6 +64,7 @@ export class StellarService {
   private horizonUrl: string;
   private networkPassphrase: string;
   private contractClient: Contract | null = null;
+  private sequenceCache: SequenceNumberCache;
 
   constructor(network: 'testnet' | 'mainnet' = 'testnet') {
     this.network = network;
@@ -65,6 +73,9 @@ export class StellarService {
     this.server = new Soroban.Server(config.sorobanRpcUrl);
     this.horizonUrl = config.horizonUrl;
     this.networkPassphrase = config.networkPassphrase;
+    
+    // Initialize sequence number cache (5 min TTL)
+    this.sequenceCache = new SequenceNumberCache(300000);
     
     this.initializeContractClient();
   }
@@ -93,6 +104,28 @@ export class StellarService {
 
   private createError(code: string, message: string, details?: string): AppError {
     return { code, message, details };
+  }
+
+  /**
+   * Safely look up a Stellar account, returning a typed result instead of throwing.
+   * Handles missing accounts (404 / account not found) and merged accounts gracefully.
+   */
+  async getAccountSafe(address: string): Promise<AccountLookupResult> {
+    try {
+      const account = await this.server.getAccount(address);
+      return { found: true, account };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Soroban SDK throws with "not found" or HTTP 404 for missing/merged accounts
+      if (
+        msg.toLowerCase().includes('not found') ||
+        msg.toLowerCase().includes('404') ||
+        msg.toLowerCase().includes('does not exist')
+      ) {
+        return { found: false, reason: 'missing' };
+      }
+      return { found: false, reason: 'error', error: msg };
+    }
   }
 
   async createTestAccount(): Promise<TestAccount> {
@@ -391,6 +424,9 @@ export class StellarService {
   }
 
   async fundTestAccount(publicKey: string): Promise<void> {
+    if (this.network !== 'testnet') {
+      throw new Error('fundTestAccount is only available on testnet');
+    }
     try {
       const response = await fetch(`https://friendbot.stellar.org/?addr=${publicKey}`);
       if (!response.ok) {
@@ -430,6 +466,25 @@ export class StellarService {
         'Failed to fetch transaction',
         error instanceof Error ? error.message : undefined
       );
+    }
+  }
+
+  /**
+   * Simulate a transaction before wallet signing.
+   * Throws a user-friendly AppError if simulation fails, so the wallet prompt is never shown.
+   */
+  private async simulateBeforeSigning(tx: Transaction): Promise<void> {
+    const sim = await this.server.simulateTransaction(tx);
+    if (Soroban.Api.isSimulationError(sim)) {
+      const decoded = decodeSimulationError(sim);
+      const err: AppError = {
+        code: decoded.code,
+        message: decoded.userMessage,
+        details: decoded.retrySuggestion,
+      };
+      // Attach debug detail without leaking it into the user-facing message
+      (err as any).debugDetail = decoded.debugDetail;
+      throw err;
     }
   }
 
@@ -513,6 +568,7 @@ export class StellarService {
         .build();
 
       const prepared = await this.server.prepareTransaction(tx);
+      await this.simulateBeforeSigning(prepared as Transaction);
       const signedXdr = await this.signWithWallet(prepared.toXDR());
       const signedTx = TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase) as Transaction;
 
@@ -647,6 +703,7 @@ export class StellarService {
         .build();
 
       const prepared = await this.server.prepareTransaction(tx);
+      await this.simulateBeforeSigning(prepared as Transaction);
       const signedXdr = await this.signWithWallet(prepared.toXDR());
       const signedTx = TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase) as Transaction;
       
@@ -691,6 +748,7 @@ export class StellarService {
         .build();
 
       const prepared = await this.server.prepareTransaction(tx);
+      await this.simulateBeforeSigning(prepared as Transaction);
       const signedXdr = await this.signWithWallet(prepared.toXDR());
       const signedTx = TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase) as Transaction;
       
@@ -728,6 +786,7 @@ export class StellarService {
         .build();
 
       const prepared = await this.server.prepareTransaction(tx);
+      await this.simulateBeforeSigning(prepared as Transaction);
       const signedXdr = await this.signWithWallet(prepared.toXDR());
       const signedTx = TransactionBuilder.fromXDR(signedXdr, this.networkPassphrase) as Transaction;
       

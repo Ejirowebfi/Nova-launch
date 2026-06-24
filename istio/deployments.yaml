@@ -1,0 +1,183 @@
+# Backend deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: nova-launch
+  labels:
+    app: backend
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: backend
+          image: nova-launch/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3001
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nova-launch-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nova-launch-secrets
+                  key: JWT_SECRET
+            - name: ADMIN_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nova-launch-secrets
+                  key: ADMIN_JWT_SECRET
+            - name: REDIS_URL
+              value: redis://redis:6379
+            - name: STELLAR_NETWORK
+              value: mainnet
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 3001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+# Frontend deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: nova-launch
+  labels:
+    app: frontend
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: v1
+    spec:
+      containers:
+        - name: frontend
+          image: nova-launch/frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+# API Gateway deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: nova-launch
+  labels:
+    app: gateway
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: gateway
+        version: v1
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: gateway
+          image: nova-launch/gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: GATEWAY_PORT
+              value: "4000"
+            - name: BACKEND_URL
+              value: http://backend:3001
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nova-launch-secrets
+                  key: JWT_SECRET
+            - name: REDIS_URL
+              value: redis://redis:6379
+            - name: ALLOWED_ORIGINS
+              value: "https://nova-launch.app"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi

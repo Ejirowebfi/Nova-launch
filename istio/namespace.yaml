@@ -1,0 +1,7 @@
+# Namespace with Istio sidecar injection enabled.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nova-launch
+  labels:
+    istio-injection: enabled

@@ -102,6 +102,11 @@ pub fn claim_vault(
         return Err(Error::CliffNotReached);
     }
 
+    // Milestone gate: if a verifier is set, milestone must be verified before funds release
+    if vault.verifier.is_some() && !vault.milestone_verified {
+        return Err(Error::MilestoneUnauthorized);
+    }
+
     // Calculate claimable amount
     let claimable = vault.total_amount
         .checked_sub(vault.claimed_amount)
@@ -141,7 +146,8 @@ fn emit_vault_claimed(env: &Env, vault_id: u64, owner: &Address, amount: i128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Vault, VaultStatus};
+    use crate::types::{Error, Vault, VaultStatus};
+    use proptest::prelude::*;
     use soroban_sdk::{
         testutils::{Address as _, Events},
         Address, BytesN, Env, FromVal, Symbol, Val,
@@ -159,6 +165,8 @@ mod tests {
             milestone_hash: BytesN::from_array(env, &[0u8; 32]),
             status,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
 
         storage::set_vault(env, &vault).unwrap();
@@ -298,6 +306,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -332,6 +342,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -363,6 +375,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -393,6 +407,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -428,6 +444,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -435,6 +453,52 @@ mod tests {
         let result = claim_vault(&env, vault_id, &attacker);
         assert_eq!(result, Err(Error::Unauthorized), 
             "Should fail - not the owner");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(150))]
+
+        /// Property 77 – Vault Claim Authorization
+        ///
+        /// Randomized owner/attacker pairs prove that only vault owner can
+        /// claim a vault. Any non-owner attempt must return Unauthorized.
+        #[test]
+        fn prop_77_vault_claim_authorization(_owner_seed in any::<u64>(), _attacker_seed in any::<u64>()) {
+            let env = Env::default();
+            env.mock_all_auths();
+            env.ledger().with_mut(|li| li.timestamp = 1000);
+
+            let owner = Address::generate(&env);
+            let mut attacker = Address::generate(&env);
+            if attacker == owner {
+                attacker = Address::generate(&env);
+            }
+            prop_assume!(attacker != owner);
+
+            let vault_id = 1;
+            let total_amount = 1_000_0000000;
+            let vault = Vault {
+                id: vault_id,
+                token: Address::generate(&env),
+                owner: owner.clone(),
+                creator: Address::generate(&env),
+                total_amount,
+                claimed_amount: 0,
+                unlock_time: 500,
+                milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
+                status: VaultStatus::Active,
+                created_at: 0,
+                verifier: None,
+                milestone_verified: false,
+            };
+            storage::set_vault(&env, &vault).unwrap();
+
+            let attacker_result = claim_vault(&env, vault_id, &attacker);
+            prop_assert_eq!(attacker_result, Err(Error::Unauthorized));
+
+            let owner_result = claim_vault(&env, vault_id, &owner);
+            prop_assert_eq!(owner_result, Ok(total_amount));
+        }
     }
 
     #[test]
@@ -472,6 +536,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Cancelled,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -503,6 +569,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -538,6 +606,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -579,6 +649,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -620,6 +692,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -651,6 +725,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -681,6 +757,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 
@@ -724,6 +802,8 @@ mod tests {
             milestone_hash: BytesN::from_array(&env, &[0u8; 32]),
             status: VaultStatus::Active,
             created_at: 0,
+            verifier: None,
+            milestone_verified: false,
         };
         storage::set_vault(&env, &vault).unwrap();
 

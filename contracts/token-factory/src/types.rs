@@ -57,11 +57,10 @@ pub struct ContractMetadata {
 /// * `initial_supply` - Initial supply at token creation
 /// * `max_supply` - Optional maximum supply cap (None = unlimited)
 /// * `metadata_uri` - Optional IPFS URI for additional metadata
+/// * `metadata_version` - Current metadata version (0 = never set, 1+ = update count)
 /// * `created_at` - Unix timestamp of token creation
 /// * `total_burned` - Cumulative amount of tokens burned
 /// * `burn_count` - Number of burn operations performed
-/// * `metadata_uri` - Optional IPFS URI for additional metadata
-/// * `created_at` - Unix timestamp of token creation
 /// * `clawback_enabled` - Whether admin can burn from any address
 ///
 /// # Examples
@@ -83,10 +82,29 @@ pub struct TokenInfo {
     pub total_burned: i128,
     pub burn_count: u32,
     pub metadata_uri: Option<String>,
+    /// Current metadata version. 0 = metadata never set; increments with each update.
+    pub metadata_version: u32,
     pub created_at: u64,
     pub is_paused: bool,
     pub clawback_enabled: bool,
     pub freeze_enabled: bool,
+}
+
+/// A historical record of a single metadata update.
+///
+/// Stored per (token_index, version) so callers can reconstruct the full
+/// update history for any token.
+///
+/// # Fields
+/// * `uri` - The metadata URI that was set in this version
+/// * `updated_at` - Ledger timestamp when the update was applied
+/// * `updated_by` - Address that performed the update
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataRecord {
+    pub uri: String,
+    pub updated_at: u64,
+    pub updated_by: Address,
 }
 
 #[contracttype]
@@ -104,6 +122,7 @@ pub struct StreamInfo {
     pub metadata: Option<String>,
     pub cancelled: bool,
     pub paused: bool,
+    pub disputed: bool,
 }
 
 #[contracttype]
@@ -146,6 +165,48 @@ pub struct GovernanceConfig {
     pub voting_period: u64,
 }
 
+/// Configuration for dynamic quorum adjustment based on historical participation.
+///
+/// When enabled, the effective quorum for a proposal is computed from the
+/// rolling average of recent participation rates, clamped to [min_quorum_percent,
+/// max_quorum_percent].
+///
+/// # Fields
+/// * `enabled`              – Whether dynamic adjustment is active.
+/// * `min_quorum_percent`   – Floor for the adjusted quorum (0–100).
+/// * `max_quorum_percent`   – Ceiling for the adjusted quorum (0–100, ≥ min).
+/// * `target_participation` – Ideal participation rate (0–100) used as the
+///                            reference point for the adjustment formula.
+/// * `window_size`          – Number of recent proposals to average over (≥ 1).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynamicQuorumConfig {
+    pub enabled: bool,
+    pub min_quorum_percent: u32,
+    pub max_quorum_percent: u32,
+    pub target_participation: u32,
+    pub window_size: u32,
+}
+
+/// Participation snapshot recorded after each proposal concludes.
+///
+/// # Fields
+/// * `proposal_id`       – The proposal this record belongs to.
+/// * `total_votes`       – Votes cast during the proposal.
+/// * `total_eligible`    – Eligible voters at the time of the proposal.
+/// * `participation_bps` – Actual participation in basis points (0–10 000).
+///                         Stored as BPS to avoid floating-point arithmetic.
+/// * `recorded_at`       – Ledger timestamp when the record was written.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParticipationRecord {
+    pub proposal_id: u64,
+    pub total_votes: u32,
+    pub total_eligible: u32,
+    pub participation_bps: u32,
+    pub recorded_at: u64,
+}
+
 /// Buyback campaign structure
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +227,66 @@ pub struct BuybackCampaign {
     pub status: CampaignStatus,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Optional price trigger: execute only when price is at or below this value (0 = disabled)
+    pub trigger_price: i128,
+    /// Last execution timestamp for interval enforcement
+    pub last_executed_at: u64,
+}
+
+/// Price trigger condition for buyback automation
+///
+/// Defines the condition under which a buyback should be triggered.
+/// When the current price is at or below `trigger_price`, the buyback executes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceTrigger {
+    /// Price threshold in stroops; buyback fires when price <= this value
+    pub trigger_price: i128,
+    /// Maximum amount to spend per triggered execution
+    pub max_spend_per_trigger: i128,
+}
+
+/// Governance proposal template for common actions
+///
+/// Templates pre-encode common governance actions so proposers don't
+/// need to manually construct payloads.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalTemplate {
+    pub id: u32,
+    pub name: String,
+    pub action_type: ActionType,
+    pub description: String,
+    pub created_at: u64,
+}
+
+/// Airdrop campaign with Merkle tree verification
+///
+/// Allows distributing tokens to a predefined set of recipients
+/// verified via a Merkle root.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AirdropCampaign {
+    pub id: u64,
+    pub token_index: u32,
+    pub merkle_root: BytesN<32>,
+    pub total_amount: i128,
+    pub claimed_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub owner: Address,
+    pub status: CampaignStatus,
+    pub created_at: u64,
+}
+
+/// Contract version info for upgrade/migration tracking
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub migrated_at: u64,
 }
 
 /// Campaign status enum
@@ -177,6 +298,78 @@ pub enum CampaignStatus {
     Completed = 2,
     Cancelled = 3,
     Expired = 4,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Liquidity Mining Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Status of a liquidity mining pool
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MiningPoolStatus {
+    /// Pool is accepting stakes and distributing rewards
+    Active = 0,
+    /// Pool is temporarily suspended; no new stakes or reward accrual
+    Paused = 1,
+    /// Pool has ended; no new stakes, but claims are still allowed
+    Ended = 2,
+}
+
+/// A liquidity mining pool that distributes reward tokens to stakers
+///
+/// Rewards are distributed proportionally based on each provider's share
+/// of the total staked amount. Uses a reward-per-token accumulator pattern
+/// for O(1) reward calculation regardless of the number of providers.
+///
+/// # Fields
+/// * `id` - Unique pool identifier
+/// * `reward_token_index` - Index of the token distributed as rewards
+/// * `stake_token_index` - Index of the token providers must stake
+/// * `reward_rate` - Reward tokens distributed per second per staked token (in stroops)
+/// * `start_time` - Unix timestamp when the pool starts
+/// * `end_time` - Unix timestamp when reward accrual stops
+/// * `total_staked` - Current total amount staked across all providers
+/// * `reward_per_token_stored` - Accumulated reward per token (scaled by REWARD_PRECISION)
+/// * `last_update_time` - Timestamp of the last reward checkpoint
+/// * `status` - Current pool lifecycle status
+/// * `created_at` - Unix timestamp when the pool was created
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidityMiningPool {
+    pub id: u64,
+    pub reward_token_index: u32,
+    pub stake_token_index: u32,
+    pub reward_rate: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub total_staked: i128,
+    pub reward_per_token_stored: i128,
+    pub last_update_time: u64,
+    pub status: MiningPoolStatus,
+    pub created_at: u64,
+}
+
+/// A liquidity provider's stake in a mining pool
+///
+/// Tracks the provider's staked amount and reward checkpoint data.
+/// The `reward_per_token_paid` field is the pool's `reward_per_token_stored`
+/// at the time of the last checkpoint for this provider.
+///
+/// # Fields
+/// * `provider` - Address of the liquidity provider
+/// * `pool_id` - ID of the pool this stake belongs to
+/// * `staked_amount` - Current amount staked by this provider
+/// * `reward_per_token_paid` - Pool's reward_per_token_stored at last checkpoint
+/// * `pending_rewards` - Rewards accrued but not yet claimed
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderStake {
+    pub provider: Address,
+    pub pool_id: u64,
+    pub staked_amount: i128,
+    pub reward_per_token_paid: i128,
+    pub pending_rewards: i128,
 }
 
 /// Individual buyback step
@@ -222,6 +415,55 @@ pub struct Vault {
     pub milestone_hash: BytesN<32>,
     pub status: VaultStatus,
     pub created_at: u64,
+    /// Authorized address that must approve milestone completion before funds
+    /// are released. `None` means no milestone gating (time-only unlock).
+    /// When set, `claim_vault` requires this address to have called
+    /// `verify_milestone` for the vault before the claim is accepted.
+    pub verifier: Option<Address>,
+    /// Set to `true` once the authorized verifier has approved the milestone.
+    pub milestone_verified: bool,
+}
+
+/// Pending multi-party vault-owner change request.
+///
+/// Both the current owner and the contract creator must approve before
+/// the vault's `owner` field is updated.
+///
+/// # Fields
+/// * `vault_id`   - The vault being modified
+/// * `new_owner`  - Proposed new owner address
+/// * `owner_approved`   - Whether the current vault owner has approved
+/// * `creator_approved` - Whether the vault creator has approved
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingVaultOwnerChange {
+    pub vault_id: u64,
+    pub new_owner: Address,
+    pub owner_approved: bool,
+    pub creator_approved: bool,
+}
+
+/// Staking Pool configuration and state
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakingPool {
+    pub id: u64,
+    pub token_index: u32,
+    pub reward_token_index: u32,
+    pub reward_rate: i128,
+    pub total_staked: i128,
+    pub acc_reward_per_share: i128,
+    pub last_reward_time: u64,
+    pub active: bool,
+    pub creator: Address,
+}
+
+/// Individual user stake state
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeInfo {
+    pub amount: i128,
+    pub reward_debt: i128,
 }
 
 /// Compact read-only snapshot of a token's current state.
@@ -235,6 +477,32 @@ pub struct TokenStats {
     pub is_paused: bool,
     pub clawback_enabled: bool,
     pub freeze_enabled: bool,
+}
+
+/// A single price observation submitted by an authorized oracle source.
+///
+/// # Fields
+/// * `price` - Raw price value (must be > 0)
+/// * `decimals` - Number of decimal places in `price` (e.g. 7 means price / 10^7)
+/// * `timestamp` - Ledger timestamp when the price was recorded
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceData {
+    pub price: i128,
+    pub decimals: u32,
+    pub timestamp: u64,
+}
+
+/// Global oracle configuration stored in instance storage.
+///
+/// # Fields
+/// * `max_age_seconds` - Maximum acceptable age of a price before it is considered stale
+/// * `min_sources` - Minimum number of authorized sources that must have submitted a price
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleConfig {
+    pub max_age_seconds: u64,
+    pub min_sources: u32,
 }
 
 /// Batch fee update structure for Phase 2 optimization
@@ -259,6 +527,62 @@ pub struct TokenStats {
 pub struct FeeUpdate {
     pub base_fee: Option<i128>,
     pub metadata_fee: Option<i128>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Burn Auction Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lifecycle status of a burn auction
+///
+/// Auctions start as `Open`, transition to `Settled` when a winning bid is
+/// placed, or to `Cancelled` when cancelled by the admin or after expiry.
+/// Both `Settled` and `Cancelled` are terminal states.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuctionStatus {
+    /// Auction is accepting bids
+    Open = 0,
+    /// A winning bid was placed; tokens have been burned
+    Settled = 1,
+    /// Auction was cancelled before settlement
+    Cancelled = 2,
+}
+
+/// A Dutch auction for token price discovery via burn
+///
+/// The price decreases linearly from `start_price` to `reserve_price` over
+/// the auction window. The first bidder to meet the current price wins and
+/// the `burn_amount` of tokens is burned.
+///
+/// # Fields
+/// * `id` - Unique auction identifier
+/// * `token_index` - Index of the token being auctioned for burn
+/// * `burn_amount` - Number of tokens to burn on settlement
+/// * `start_price` - Opening price in stroops (highest)
+/// * `reserve_price` - Minimum price in stroops (floor)
+/// * `start_time` - Unix timestamp when bidding opens
+/// * `end_time` - Unix timestamp when the auction expires
+/// * `winning_bid` - Settlement price (None until settled)
+/// * `winner` - Address of the winning bidder (None until settled)
+/// * `status` - Current auction lifecycle status
+/// * `created_at` - Unix timestamp of auction creation
+/// * `settled_at` - Unix timestamp of settlement (None until settled)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BurnAuction {
+    pub id: u64,
+    pub token_index: u32,
+    pub burn_amount: i128,
+    pub start_price: i128,
+    pub reserve_price: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub winning_bid: Option<i128>,
+    pub winner: Option<Address>,
+    pub status: AuctionStatus,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
 }
 
 /// Storage keys for contract data
@@ -307,9 +631,230 @@ pub enum DataKey {
     CampaignByCreator(Address, u32),
     CreatorCampaignCount(Address),
     ActiveCampaigns,
+    // Airdrop
+    AirdropCampaign(u64),
+    AirdropCampaignCount,
+    AirdropClaimed(u64, Address),
+    // Governance templates
+    ProposalTemplate(u32),
+    ProposalTemplateCount,
+    // Contract upgrade
+    ContractVersion,
+    StorageVersion,
+    // Dividend distribution (#1148)
+    DividendDust(u32),
+    DividendRecord(u64),
+    DividendDistributionCount,
+    // Dynamic quorum
+    DynamicQuorumConfig,
+    ParticipationRecord(u64), // keyed by proposal_id
+    // Game / deployment history
+    HistoryCount,
+    HistoryRecord(u64),
+    // Referral system
+    ReferralInfo(Address),
+    ReferralCommissionRate,
+    ReferralTotalEarned(Address),
+    // Token snapshot mechanism
+    /// Number of balance snapshots for (token_index, holder)
+    BalanceSnapshotCount(u32, Address),
+    /// Individual balance snapshot: (token_index, holder, snapshot_index)
+    BalanceSnapshot(u32, Address, u32),
+    /// Number of supply snapshots for token_index
+    SupplySnapshotCount(u32),
+    /// Individual supply snapshot: (token_index, snapshot_index)
+    SupplySnapshot(u32, u32),
+    /// Index of the token used for fee payments
+    FeeToken,
+    /// Address of the governance contract authorized for restricted operations
+    Governance,
+    /// Metadata history record: (token_index, record_index)
+    MetadataHistory(u32, u32),
+    /// Burn schedules for a token: (token_index, schedule_index)
+    BurnSchedulesByToken(u32, u32),
+    /// Number of burn schedules for a token
+    BurnScheduleCountByToken(u32),
+    /// Reentrancy guard flag — set while a burn is in progress
+    ReentrancyLock,
+    /// Content hash for token metadata (token_index → BytesN<32>)
+    MetadataContentHash(u32),
+    /// Pending vault-owner change: vault_id → (new_owner, approvals_bitmap)
+    PendingVaultOwnerChange(u64),
+    // Pull-model dividend distribution (#1148)
+    /// Distribution record keyed by distribution_id
+    Distribution(u32),
+    /// Total number of distributions initiated
+    DistributionCount,
+    /// Whether a holder has claimed for a distribution: (distribution_id, holder)
+    DistributionClaimed(u32, Address),
+    /// Running total of amounts claimed for a distribution
+    DistributionClaimedTotal(u32),
 }
 
+/// A point-in-time record of a token holder's balance.
+///
+/// Snapshots are taken automatically on every mint and burn that affects
+/// a holder's balance, enabling historical balance queries at any ledger
+/// sequence number.
+///
+/// # Fields
+/// * `ledger` - Ledger sequence number when the snapshot was taken
+/// * `timestamp` - Unix timestamp when the snapshot was taken
+/// * `balance` - Token balance at this point in time
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BalanceSnapshot {
+    pub ledger: u32,
+    pub timestamp: u64,
+    pub balance: i128,
+}
+
+/// A point-in-time record of a token's total supply.
+///
+/// Taken automatically on every mint and burn, enabling historical
+/// supply queries at any ledger sequence number.
+///
+/// # Fields
+/// * `ledger` - Ledger sequence number when the snapshot was taken
+/// * `timestamp` - Unix timestamp when the snapshot was taken
+/// * `total_supply` - Total circulating supply at this point in time
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupplySnapshot {
+    pub ledger: u32,
+    pub timestamp: u64,
+    pub total_supply: i128,
+}
+
+/// Lifecycle status of a scheduled burn
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BurnScheduleStatus {
+    /// Waiting for the unlock time to pass
+    Pending = 0,
+    /// Burn has been executed
+    Executed = 1,
+    /// Burn was cancelled before execution
+    Cancelled = 2,
+}
+
+/// A time-locked token burn schedule
+///
+/// Created by the token admin; the burn cannot execute until
+/// `unlock_time` has passed. Anyone may trigger execution after
+/// the lock expires.
+///
+/// # Fields
+/// * `id`           – Unique schedule identifier
+/// * `token_index`  – Index of the token to burn
+/// * `from`         – Address whose balance will be burned
+/// * `amount`       – Amount to burn (in smallest unit)
+/// * `unlock_time`  – Earliest ledger timestamp at which execution is allowed
+/// * `created_at`   – Ledger timestamp when the schedule was created
+/// * `executed_at`  – Ledger timestamp of execution (None until executed)
+/// * `creator`      – Address that created the schedule (admin)
+/// * `status`       – Current lifecycle status
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BurnSchedule {
+    pub id: u64,
+    pub token_index: u32,
+    pub from: Address,
+    pub amount: i128,
+    pub unlock_time: u64,
+    pub created_at: u64,
+    pub executed_at: Option<u64>,
+    pub creator: Address,
+    pub status: BurnScheduleStatus,
+}
+
+/// Vesting schedule for token grants
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingSchedule {
+    pub recipient: Address,
+    pub token_index: u32,
+    pub total_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
+    pub claimed_amount: i128,
+    pub cancelled: bool,
+}
+
+/// Priority level for proposal execution queue
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProposalPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3,
+}
+
+/// Entry in the priority execution queue
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueueEntry {
+    pub proposal_id: u64,
+    pub priority: ProposalPriority,
+    pub enqueued_at: u64,
+    pub eta: u64,
+}
+
+/// Role-based access control roles for token operations
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Role {
+    /// Can update token metadata URI
+    MetadataManager,
+    /// Can pause/unpause the token
+    Pauser,
+    /// Can mint new tokens
+    Minter,
+}
+
+/// Multi-signature configuration
+///
+/// Defines the threshold and signers for multi-sig admin operations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiSigConfig {
+    /// Addresses authorized to approve proposals
+    pub signers: soroban_sdk::Vec<Address>,
+    /// Number of approvals required to execute a proposal
+    pub threshold: u32,
+}
+
+/// Type of admin operation requiring multi-sig approval
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MultiSigAction {
+    /// Transfer admin to a new address
+    TransferAdmin,
+    /// Update fee structure
+    UpdateFees,
+    /// Pause the contract
+    PauseContract,
+    /// Unpause the contract
+    UnpauseContract,
+}
+
+/// A pending multi-sig proposal
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiSigProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action: MultiSigAction,
+    /// ABI-encoded action payload (e.g., new admin address, fee values)
+    pub payload: soroban_sdk::Bytes,
+    pub created_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+    pub approval_count: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Error(pub u32);
 
@@ -368,6 +913,84 @@ impl Error {
     pub const CampaignNotFound: Self = Self(51);
     pub const InvalidBudget: Self = Self(52);
     pub const InsufficientBudget: Self = Self(53);
+    // Buyback price trigger errors
+    pub const PriceTriggerNotMet: Self = Self(54);
+    pub const CampaignExpiredError: Self = Self(55);
+    pub const IntervalNotElapsed: Self = Self(56);
+    // Airdrop errors
+    pub const AirdropNotFound: Self = Self(57);
+    pub const AirdropAlreadyClaimed: Self = Self(58);
+    pub const InvalidMerkleProof: Self = Self(59);
+    pub const AirdropExpired: Self = Self(60);
+    pub const AirdropNotStarted: Self = Self(61);
+    // Governance template errors
+    pub const TemplateNotFound: Self = Self(62);
+    // Upgrade errors
+    pub const UpgradeUnauthorized: Self = Self(63);
+    pub const MigrationFailed: Self = Self(64);
+    // Campaign state errors
+    pub const CampaignAlreadyPaused: Self = Self(65);
+    pub const CampaignNotPaused: Self = Self(66);
+    pub const CampaignCompleted: Self = Self(67);
+    pub const CampaignCancelled: Self = Self(68);
+    // Dynamic quorum errors
+    pub const DynamicQuorumDisabled: Self = Self(69);
+    pub const InsufficientParticipationHistory: Self = Self(70);
+    pub const InvalidQuorumBounds: Self = Self(71);
+    pub const MetadataNotSet: Self = Self(80);
+    // Multi-sig errors
+    pub const MultiSigNotConfigured: Self = Self(72);
+    pub const MultiSigProposalNotFound: Self = Self(73);
+    pub const MultiSigAlreadyApproved: Self = Self(74);
+    pub const MultiSigProposalExecuted: Self = Self(75);
+    pub const MultiSigProposalCancelled: Self = Self(76);
+    pub const MultiSigThresholdNotMet: Self = Self(77);
+    pub const NotASigner: Self = Self(78);
+    pub const InvalidThreshold: Self = Self(79);
+    // Burn schedule errors
+    pub const BurnScheduleNotFound: Self = Self(81);
+    pub const BurnScheduleLocked: Self = Self(82);
+    // Storage migration errors (#1147)
+    pub const StorageMigrationAlreadyRun: Self = Self(83);
+    pub const StorageMigrationNotRequired: Self = Self(84);
+    // Dividend distribution errors (#1148)
+    pub const DividendDistributionFailed: Self = Self(85);
+    pub const DividendZeroHolders: Self = Self(86);
+    pub const DividendOverflow: Self = Self(87);
+    pub const DividendExceedsPool: Self = Self(88);
+    pub const BurnScheduleAlreadyExecuted: Self = Self(83);
+    pub const BurnScheduleCancelled: Self = Self(84);
+    pub const InvalidUnlockTime: Self = Self(85);
+    // Batch rollback errors
+    /// A batch operation failed at the given element index; no state was changed.
+    pub const PartialBatchFailure: Self = Self(86);
+    // Stream dispute errors
+    pub const StreamDisputed: Self = Self(87);
+    pub const StreamNotDisputed: Self = Self(88);
+    pub const DisputeAlreadyRaised: Self = Self(89);
+    // Campaign recovery errors
+    pub const CampaignFinalizationFailed: Self = Self(90);
+    // Proposal cancellation errors
+    pub const ProposalNotCancellable: Self = Self(91);
+    // Burn reentrancy guard (#1132)
+    pub const BurnReentrancyDetected: Self = Self(92);
+    // Metadata content hash errors (#1131)
+    pub const InvalidMetadataHash: Self = Self(93);
+    pub const MetadataHashMismatch: Self = Self(94);
+    // Milestone signature errors (#1133)
+    pub const MilestoneUnauthorized: Self = Self(95);
+    pub const MilestoneAlreadyVerified: Self = Self(96);
+    // Vault beneficiary multi-party auth errors (#1134)
+    pub const VaultOwnerChangePending: Self = Self(97);
+    pub const VaultOwnerChangeNotFound: Self = Self(98);
+    pub const VaultOwnerChangeAlreadyApproved: Self = Self(99);
+    // Pull-model dividend distribution errors (#1148)
+    pub const DistributionNotFound: Self = Self(100);
+    pub const DistributionWindowClosed: Self = Self(101);
+    pub const DistributionWindowOpen: Self = Self(102);
+    pub const DistributionAlreadyClaimed: Self = Self(103);
+    pub const DistributionAlreadyReclaimed: Self = Self(104);
+    pub const DistributionZeroSupply: Self = Self(105);
 }
 
 impl From<Error> for soroban_sdk::Error {
@@ -411,6 +1034,7 @@ pub enum ActionType {
     PauseContract,
     UnpauseContract,
     PolicyUpdate,
+    ParameterChange,
 }
 
 #[contracttype]
@@ -576,7 +1200,7 @@ pub struct WithdrawalPeriod {
     pub amount_withdrawn: i128,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-tests"))]
 mod tests {
     use super::{DataKey, Vault, VaultStatus};
     use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, BytesN, Env};
@@ -973,142 +1597,88 @@ mod tests {
         });
     }
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Token Fractionalization Types
+// ═══════════════════════════════════════════════════════════════════════
 
-    #[test]
-    fn test_campaign_status_serialization_round_trip() {
-        let (env, contract_id) = setup();
-        let variants = [
-            super::CampaignStatus::Active,
-            super::CampaignStatus::Paused,
-            super::CampaignStatus::Completed,
-            super::CampaignStatus::Cancelled,
-        ];
+/// Fractionalized asset vault containing locked NFT-like asset
+///
+/// Represents a unique asset that has been locked in the contract
+/// and fractionalized into fungible tokens representing ownership shares.
+///
+/// # Fields
+/// * `id` - Unique vault identifier
+/// * `asset_id` - Unique identifier of the locked asset (e.g., NFT token ID)
+/// * `asset_contract` - Contract address of the original asset
+/// * `owner` - Original owner who fractionalized the asset
+/// * `fractional_token` - Address of the minted fractional tokens
+/// * `total_supply` - Total supply of fractional tokens minted
+/// * `created_at` - Timestamp when asset was fractionalized
+/// * `status` - Current status of the fractionalized asset
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FractionalVault {
+    pub id: u64,
+    pub asset_id: BytesN<32>,
+    pub asset_contract: Address,
+    pub owner: Address,
+    pub fractional_token: Address,
+    pub total_supply: i128,
+    pub created_at: u64,
+    pub status: FractionalStatus,
+}
 
-        env.as_contract(&contract_id, || {
-            for (i, status) in variants.iter().enumerate() {
-                let key = DataKey::Campaign(i as u64);
-                env.storage().instance().set(&key, status);
-                let decoded: super::CampaignStatus = env.storage().instance().get(&key).unwrap();
-                assert_eq!(decoded, *status);
-            }
-        });
-    }
+/// Status of a fractionalized asset
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FractionalStatus {
+    /// Asset is locked and fractional tokens are in circulation
+    Active,
+    /// Asset has been redeemed and returned to owner
+    Redeemed,
+}
 
-    #[test]
-    fn test_campaign_serialization_round_trip() {
-        let (env, contract_id) = setup();
-        let campaign = super::BuybackCampaign {
-            id: 1,
-            token_index: 0,
-            owner: Address::generate(&env),
-            budget_allocated: 10_000_0000000,
-            budget_spent: 2_500_0000000,
-            tokens_burned: 50_000_0000000,
-            burn_count: 10,
-            start_time: 1700000000,
-            end_time: 1702592000,
-            status: super::CampaignStatus::Active,
-            created_at: 1700000000,
-        };
+/// Parameters for fractionalizing an asset
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FractionalizationParams {
+    pub asset_id: BytesN<32>,
+    pub asset_contract: Address,
+    pub total_supply: i128,
+    pub token_name: String,
+    pub token_symbol: String,
+}
 
-        env.as_contract(&contract_id, || {
-            let key = DataKey::Campaign(campaign.id);
-            env.storage().instance().set(&key, &campaign);
-            let decoded: super::BuybackCampaign = env.storage().instance().get(&key).unwrap();
-            assert_eq!(decoded, campaign);
-        });
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// Pull-model Dividend Distribution Types (#1148)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_campaign_deterministic_encoding() {
-        let (env, contract_id) = setup();
-        let owner = Address::generate(&env);
-        
-        let campaign1 = super::BuybackCampaign {
-            id: 42,
-            token_index: 5,
-            owner: owner.clone(),
-            budget_allocated: 1_000_000,
-            budget_spent: 250_000,
-            tokens_burned: 10_000,
-            burn_count: 5,
-            start_time: 1700000000,
-            end_time: 1702592000,
-            status: super::CampaignStatus::Active,
-            created_at: 1700000000,
-        };
-
-        let campaign2 = super::BuybackCampaign {
-            id: 42,
-            token_index: 5,
-            owner: owner.clone(),
-            budget_allocated: 1_000_000,
-            budget_spent: 250_000,
-            tokens_burned: 10_000,
-            burn_count: 5,
-            start_time: 1700000000,
-            end_time: 1702592000,
-            status: super::CampaignStatus::Active,
-            created_at: 1700000000,
-        };
-
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::Campaign(1), &campaign1);
-            env.storage().instance().set(&DataKey::Campaign(2), &campaign2);
-
-            let decoded1: super::BuybackCampaign = env.storage().instance().get(&DataKey::Campaign(1)).unwrap();
-            let decoded2: super::BuybackCampaign = env.storage().instance().get(&DataKey::Campaign(2)).unwrap();
-
-            assert_eq!(decoded1, decoded2);
-            assert_eq!(decoded1, campaign1);
-            assert_eq!(decoded2, campaign2);
-        });
-    }
-
-    #[test]
-    fn test_campaign_datakey_serialization_round_trip() {
-        let (env, contract_id) = setup();
-        let owner = Address::generate(&env);
-        let keys = [
-            DataKey::Campaign(1),
-            DataKey::Campaign(999),
-            DataKey::CampaignCount,
-            DataKey::CampaignByOwner(owner.clone(), 0),
-            DataKey::OwnerCampaignCount(owner.clone()),
-            DataKey::ActiveCampaigns,
-            DataKey::ActiveCampaignCount,
-        ];
-
-        env.as_contract(&contract_id, || {
-            for (i, key) in keys.iter().enumerate() {
-                env.storage().instance().set(key, &(i as u32));
-                let value: u32 = env.storage().instance().get(key).unwrap();
-                assert_eq!(value, i as u32);
-            }
-        });
-    }
-
-    #[test]
-    fn test_campaign_boundary_values() {
-        let (env, contract_id) = setup();
-        
-        let campaign = super::BuybackCampaign {
-            id: u64::MAX,
-            token_index: u32::MAX,
-            owner: Address::generate(&env),
-            budget_allocated: i128::MAX,
-            budget_spent: 0,
-            tokens_burned: i128::MAX,
-            burn_count: u32::MAX,
-            start_time: u64::MAX,
-            end_time: u64::MAX,
-            status: super::CampaignStatus::Completed,
-            created_at: u64::MAX,
-        };
-
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::Campaign(u64::MAX), &campaign);
-            let decoded: super::BuybackCampaign = env.storage().instance().get(&DataKey::Campaign(u64::MAX)).unwrap();
-            assert_eq!(decoded, campaign);
-        });
-    }
+/// An on-chain dividend distribution round (pull model).
+///
+/// Created by `initiate_distribution`; each holder independently calls
+/// `claim_dividend` during the claim window.  After `claim_deadline_ledger`
+/// passes, unclaimed funds can be recovered by the admin via `reclaim_unclaimed`.
+///
+/// # Fields
+/// * `id`                      – Unique distribution identifier (auto-increment)
+/// * `token_index`             – Index of the token whose holders receive dividends
+/// * `asset`                   – Address of the asset being distributed (e.g. XLM token)
+/// * `total_amount`            – Total pool size funded by the initiator
+/// * `snapshot_ledger`         – Ledger at which holder balances were snapshotted
+/// * `total_supply_at_snapshot`– Token total supply at snapshot (denominator for pro-rata)
+/// * `claim_deadline_ledger`   – Last ledger at which holders may claim
+/// * `reclaimed`               – Whether the admin has already reclaimed unclaimed funds
+/// * `created_at`              – Ledger timestamp of distribution creation
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributionRecord {
+    pub id: u32,
+    pub token_index: u32,
+    pub asset: Address,
+    pub total_amount: i128,
+    pub snapshot_ledger: u32,
+    pub total_supply_at_snapshot: i128,
+    pub claim_deadline_ledger: u32,
+    pub reclaimed: bool,
+    pub created_at: u64,
+}

@@ -1,5 +1,23 @@
-import { HttpException, HttpStatus } from "@nestjs/common";
 import { StellarErrorCode } from "./stellar.types";
+
+export enum HttpStatus {
+  BAD_REQUEST = 400,
+  NOT_FOUND = 404,
+  TOO_MANY_REQUESTS = 429,
+  BAD_GATEWAY = 502,
+  GATEWAY_TIMEOUT = 504,
+  INTERNAL_SERVER_ERROR = 500,
+}
+
+export class HttpException extends Error {
+  constructor(
+    public readonly response: unknown,
+    public readonly status: HttpStatus
+  ) {
+    super(typeof response === "string" ? response : "HttpException");
+    this.name = "HttpException";
+  }
+}
 
 export class StellarException extends HttpException {
   public readonly code: StellarErrorCode;
@@ -90,6 +108,20 @@ export class StellarParseException extends StellarException {
       `Parse error: ${message}`,
       details,
       HttpStatus.INTERNAL_SERVER_ERROR
+    );
+  }
+}
+
+export class StellarSequenceMismatchException extends StellarException {
+  constructor(accountId: string, details?: unknown) {
+    super(
+      StellarErrorCode.TRANSACTION_FAILED,
+      `Sequence number mismatch for account: ${accountId}`,
+      details,
+      HttpStatus.BAD_REQUEST
+    );
+  }
+}
     );
   }
 }

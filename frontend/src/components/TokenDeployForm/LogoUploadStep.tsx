@@ -147,6 +147,21 @@ export function LogoUploadStep({
         <div className="bg-red-50 border border-red-200 rounded p-4">
           <p className="text-sm font-medium text-red-800">Upload Error</p>
           <p className="text-sm text-red-700 mt-1">{uploadError}</p>
+          <div className="mt-3">
+            <Button
+              type="button"
+              variant="danger"
+              size="sm"
+              onClick={() => {
+                setUploadError(null);
+                setUploadPercent(null);
+                handleUpload();
+              }}
+              disabled={isUploading}
+            >
+              Retry Upload
+            </Button>
+          </div>
         </div>
       )}
 

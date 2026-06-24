@@ -1,5 +1,4 @@
 import { prisma } from "../prisma";
-import NodeCache from "node-cache";
 import {
   HealthStatus,
   ServiceHealth,
@@ -17,14 +16,13 @@ const _env = validateEnv();
 export class HealthService {
   private static instance: HealthService;
   private readonly startTime: number;
-  private readonly cache: NodeCache;
+  private readonly cache = new TTLCache(30_000);
   private readonly version: string;
   private requestCount = 0;
   private errorCount = 0;
 
   private constructor() {
     this.startTime = Date.now();
-    this.cache = new NodeCache({ stdTTL: 30, checkperiod: 10 });
     this.version = process.env.npm_package_version || "0.1.0";
   }
 
@@ -88,7 +86,7 @@ export class HealthService {
       services,
     };
 
-    this.cache.set(cacheKey, result);
+    this.cache.set<HealthCheckResult>(cacheKey, result);
     return result;
   }
 
@@ -113,7 +111,7 @@ export class HealthService {
       metrics,
     };
 
-    this.cache.set(cacheKey, result);
+    this.cache.set<DetailedHealthCheckResult>(cacheKey, result);
     return result;
   }
 
@@ -288,12 +286,12 @@ export class HealthService {
     try {
       await Promise.race([
         (async () => {
-          this.cache.set(testKey, testValue, 1);
-          const retrieved = this.cache.get(testKey);
+          this.cache.set<string>(testKey, testValue);
+          const retrieved = this.cache.get<string>(testKey);
           if (retrieved !== testValue) {
             throw new Error("Cache value mismatch");
           }
-          this.cache.del(testKey);
+          this.cache.delete(testKey);
         })(),
         this.timeoutPromise(timeout, "Cache check timeout"),
       ]);
@@ -403,6 +401,37 @@ export class HealthService {
     return new Promise((_, reject) => {
       setTimeout(() => reject(new Error(message)), ms);
     });
+  }
+}
+
+class TTLCache {
+  private readonly entries = new Map<string, { value: unknown; expiresAt: number }>();
+
+  constructor(private readonly ttlMs: number) {}
+
+  get<T = unknown>(key: string): T | undefined {
+    const entry = this.entries.get(key);
+    if (!entry) {
+      return undefined;
+    }
+
+    if (Date.now() >= entry.expiresAt) {
+      this.entries.delete(key);
+      return undefined;
+    }
+
+    return entry.value as T;
+  }
+
+  set<T = unknown>(key: string, value: T): void {
+    this.entries.set(key, {
+      value,
+      expiresAt: Date.now() + this.ttlMs,
+    });
+  }
+
+  delete(key: string): void {
+    this.entries.delete(key);
   }
 }
 

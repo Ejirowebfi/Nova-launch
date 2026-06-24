@@ -26,6 +26,7 @@ fn validate_token_params(
 
     // Validate initial supply (must be positive)
     if initial_supply <= 0 {
+        crate::events::emit_error_detail(env, Error::InvalidTokenParams as u32, initial_supply);
         return Err(Error::InvalidTokenParams);
     }
 
@@ -59,11 +60,14 @@ pub fn create_token_internal(
         params.initial_supply,
     )?;
 
+    // Validate max_supply: if set, must be >= initial_supply
+    crate::mint::validate_max_supply_at_creation(params.initial_supply, params.max_supply)?;
+
     // Generate token address (placeholder - in production this would deploy actual token contract)
     // For now, we create a deterministic address based on token index
     let token_address = env.current_contract_address();
 
-    // Create token info
+    // Create token info — wire max_supply from params so the hard cap is persisted
     let token_info = TokenInfo {
         address: token_address.clone(),
         creator: creator.clone(),
@@ -72,8 +76,9 @@ pub fn create_token_internal(
         decimals: params.decimals,
         total_supply: params.initial_supply,
         initial_supply: params.initial_supply,
-        max_supply: None,
+        max_supply: params.max_supply,
         metadata_uri: params.metadata_uri.clone(),
+        metadata_version: 0,
         created_at: env.ledger().timestamp(),
         total_burned: 0,
         burn_count: 0,
@@ -100,6 +105,9 @@ pub fn create_token_internal(
         params.initial_supply,
     );
 
+    // Record deployment in history log.
+    crate::game_history::record_deployment(env, token_index, &token_info);
+
     Ok(token_address)
 }
 
@@ -125,6 +133,7 @@ pub fn create_token(
     // Calculate and verify fee
     let required_fee = calculate_creation_fee(env, metadata_uri.is_some());
     if fee_payment < required_fee {
+        crate::events::emit_error_detail(env, Error::InsufficientFee as u32, required_fee - fee_payment);
         return Err(Error::InsufficientFee);
     }
 
@@ -144,9 +153,22 @@ pub fn create_token(
     // Create token
     let token_address = create_token_internal(env, &creator, &params, token_index)?;
 
-    // Transfer fee to treasury (placeholder - in production would use actual token transfer)
-    // let treasury = storage::get_treasury(env);
-    // token::transfer(env, &creator, &treasury, fee_payment);
+    // Credit referral commission if the creator has a registered referrer.
+    crate::referral::credit_commission(env, &creator, token_index, fee_payment);
+
+    // Transfer fee to treasury
+    let treasury = storage::get_treasury(env);
+    
+    // Validate treasury is not the creator or zero address (though generate_address handles zero usually)
+    if treasury == creator {
+        crate::events::emit_error_detail(env, Error::InvalidParameters as u32, 100); // 100 = self treasury
+        return Err(Error::InvalidParameters);
+    }
+
+    if let Some(fee_token) = storage::get_fee_token(env) {
+        let client = soroban_sdk::token::Client::new(env, &fee_token);
+        client.transfer(&creator, &treasury, &required_fee);
+    }
 
     Ok(token_address)
 }
@@ -242,9 +264,17 @@ pub fn batch_create_tokens(
     // Emit batch creation event
     crate::events::emit_batch_tokens_created(env, &creator, tokens.len() as u32);
 
-    // Transfer total fee to treasury (placeholder)
-    // let treasury = storage::get_treasury(env);
-    // token::transfer(env, &creator, &treasury, total_fee_payment);
+    // Transfer total fee to treasury
+    let treasury = storage::get_treasury(env);
+    
+    if treasury == creator {
+        return Err(Error::InvalidParameters);
+    }
+
+    if let Some(fee_token) = storage::get_fee_token(env) {
+        let client = soroban_sdk::token::Client::new(env, &fee_token);
+        client.transfer(&creator, &treasury, &total_required_fee);
+    }
 
     Ok(created_addresses)
 }

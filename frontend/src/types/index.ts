@@ -19,10 +19,13 @@ export interface DeploymentResult {
     metadataUrl?: string;
 }
 
+export type WalletType = 'freighter' | 'lobstr' | 'albedo' | 'xbull';
+
 export interface WalletState {
     connected: boolean;
     address: string | null;
     network: 'testnet' | 'mainnet';
+    walletType?: WalletType;
 }
 
 export interface TokenInfo {
@@ -33,8 +36,17 @@ export interface TokenInfo {
     totalSupply: string;
     creator: string;
     metadataUri?: string;
+    /** Current metadata version. 0 = never set; increments with each update_metadata call. */
+    metadataVersion?: number;
     deployedAt: number;
     transactionHash: string;
+}
+
+/** A single historical metadata record returned by get_metadata_history. */
+export interface MetadataRecord {
+    uri: string;
+    updatedAt: number;
+    updatedBy: string;
 }
 
 export interface TokenMetadata {
@@ -83,6 +95,16 @@ export const ErrorCode = {
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
+
+// Deployment Recovery Types
+export type DeploymentStatusType = 'PENDING' | 'CONFIRMED' | 'FAILED';
+
+export interface DeploymentStatusResponse {
+  txHash: string;
+  status: DeploymentStatusType;
+  ledger?: number;
+  reason?: string; // Stellar error code/reason if failed
+}
 
 // Burn Types
 export interface BurnTokenParams {
@@ -177,6 +199,22 @@ export interface RecurringPaymentFilters {
     status?: RecurringPaymentStatus;
     tokenAddress?: string;
     search?: string;
+}
+
+export interface VaultProjection {
+    streamId: number;
+    creator: string;
+    recipient: string;
+    amount: string;
+    status: string;
+    createdAt: string | number | Date;
+    /** Ledger at which vesting starts (on-chain field). */
+    startLedger?: number;
+    /** Ledger at which vesting fully matures (on-chain field). */
+    endLedger?: number;
+    claimedAt?: string | number | Date | null;
+    cancelledAt?: string | number | Date | null;
+    txHash?: string;
 }
 
 export * from './governance';

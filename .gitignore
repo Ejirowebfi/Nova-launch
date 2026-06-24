@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 target/
+**/target/
+**/package-lock.json
+**/pnpm-lock.yaml
+**/yarn.lock
+**/bun.lockb
+**/Cargo.lock
 
 # Environment
 .env
@@ -46,7 +52,17 @@ npm-debug.log*
 !GLOBAL_ERROR_HANDLING.md
 !docs/user-guides/*.md
 !docs/ENVIRONMENT_INTEGRATION.md
+!docs/PRODUCTION_INTEGRATION_RUNBOOK.md
+!docs/CONTRACT_UPGRADE_COMPATIBILITY.md
+!docs/MAINNET_READINESS_CHECKLIST.md
+!docs/INTEGRATION_METRICS.md
+!docs/PRODUCTION_READINESS_GATE.md
+!docs/DATABASE_BACKUP_PITR.md
+!docs/MIGRATION_ROLLBACK_RUNBOOK.md
+!docs/EVENT_REPLAY_RECOVERY.md
+!docs/STELLAR_READ_CACHE.md
 !ACCESSIBILITY_TESTING_GUIDE.md
+!IMPLEMENTATION_SUMMARY.md
 !TEST_ARTIFACTS_GUIDE.md
 !TEST_ARTIFACTS_QUICK_REF.md
 !TEST_ARTIFACTS_IMPLEMENTATION.md

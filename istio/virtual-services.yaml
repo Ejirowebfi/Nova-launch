@@ -1,0 +1,77 @@
+# VirtualServices — L7 routing rules applied by Istio sidecars.
+#
+# External traffic (via IngressGateway):
+#   /api/*   → gateway:4000
+#   /health* → backend:3001  (bypass gateway for k8s probes)
+#   /*       → frontend:80
+#
+# Internal traffic (service-to-service):
+#   gateway → backend  (with retry + timeout)
+#   backend → redis    (passthrough, no retries on tcp)
+
+# ── External routing ──────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: nova-launch-ingress
+  namespace: nova-launch
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - nova-launch-gateway
+  http:
+    # Health endpoints bypass the gateway (used by k8s probes and monitoring)
+    - match:
+        - uri:
+            prefix: /health
+      route:
+        - destination:
+            host: backend
+            port:
+              number: 3001
+      timeout: 5s
+
+    # All /api/* traffic goes through the API gateway
+    - match:
+        - uri:
+            prefix: /api
+      route:
+        - destination:
+            host: gateway
+            port:
+              number: 4000
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: gateway-error,connect-failure,retriable-4xx
+
+    # Everything else → frontend SPA
+    - route:
+        - destination:
+            host: frontend
+            port:
+              number: 80
+      timeout: 10s
+---
+# ── gateway → backend (internal) ─────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: backend-internal
+  namespace: nova-launch
+spec:
+  hosts:
+    - backend
+  http:
+    - route:
+        - destination:
+            host: backend
+            port:
+              number: 3001
+      timeout: 15s
+      retries:
+        attempts: 3
+        perTryTimeout: 5s
+        retryOn: gateway-error,connect-failure,reset

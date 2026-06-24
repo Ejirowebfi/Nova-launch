@@ -5,12 +5,16 @@ import { Spinner, ErrorBoundary } from "./components/UI";
 import { DashboardLayout } from "./components/Layout";
 import { PerformanceDashboard } from "./components/PerformanceDashboard";
 import { PWAUpdateNotification } from "./components/PWA";
+import { IntegrationVersionBanner } from "./components/IntegrationVersionBanner";
+import type { CompatibilityInfo } from "./components/IntegrationVersionBanner";
+import { LanguageSelector } from "./components/LanguageSelector";
 
 // Lazy load pages
 const LandingPage = lazy(() => import("./pages/LandingPage"));
 const NotFoundRoute = lazy(() => import("./routes/NotFoundRoute"));
 const RecurringPayments = lazy(() => import("./app/dashboard/RecurringPayments"));
 const CampaignDashboard = lazy(() => import("./app/dashboard/CampaignDashboard"));
+const GovernancePage = lazy(() => import("./pages/GovernancePage"));
 
 // Loading fallback
 function PageLoader() {
@@ -33,7 +37,7 @@ function normalizePath(pathname: string): string {
   return pathname || "/";
 }
 
-function App() {
+function App({ compatibilityInfo }: { compatibilityInfo?: CompatibilityInfo }) {
   const [pathname, setPathname] = useState(() =>
     normalizePath(window.location.pathname)
   );
@@ -109,6 +113,20 @@ function App() {
       );
     }
 
+    if (pathname === "/governance") {
+      return (
+        <DashboardLayout
+          wallet={wallet}
+          onConnect={connect}
+          onDisconnect={disconnect}
+          isConnecting={isConnecting}
+          currentPath={pathname}
+        >
+          <GovernancePage wallet={wallet} />
+        </DashboardLayout>
+      );
+    }
+
     if (pathname === "/" || pathname === "/deploy") {
       return (
         <LandingPage
@@ -125,11 +143,19 @@ function App() {
 
   return (
     <ErrorBoundary>
+      {compatibilityInfo && (
+        <IntegrationVersionBanner info={compatibilityInfo} />
+      )}
       <Suspense fallback={<PageLoader />}>
         <div id="main-content" tabIndex={-1}>
           {page}
         </div>
       </Suspense>
+
+      {/* Language Selector */}
+      <div className="fixed top-4 right-4 z-50">
+        <LanguageSelector variant="inline" />
+      </div>
 
       {/* PWA Update Notification */}
       <PWAUpdateNotification />

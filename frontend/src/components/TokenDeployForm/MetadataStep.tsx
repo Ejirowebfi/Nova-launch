@@ -128,8 +128,8 @@ export function MetadataStep({ onNext, onBack, initialData }: MetadataStepProps)
                                 />
                                 <div className="flex justify-between text-xs">
                                     <span className="text-gray-500">Optional</span>
-                                    <span className={remainingChars < 50 ? 'text-orange-600' : 'text-gray-500'}>
-                                        {remainingChars} characters remaining
+                                    <span className={remainingChars <= 50 ? 'text-red-500' : 'text-gray-500'}>
+                                        {remainingChars === 0 ? 'Character limit reached' : `${remainingChars} characters remaining`}
                                     </span>
                                 </div>
                             </div>

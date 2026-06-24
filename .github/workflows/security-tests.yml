@@ -24,10 +24,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -74,7 +74,7 @@ jobs:
           NODE_ENV: test
 
       - name: Upload Coverage Reports
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v6
         with:
           files: ./backend/coverage/coverage-final.json
           flags: security-tests
@@ -96,7 +96,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Validate Risk Matrix
         run: |
@@ -145,7 +145,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Generate Report
         run: |
@@ -162,7 +162,7 @@ jobs:
           echo "See [THREAT_MODEL_RISK_MATRIX.md](backend/THREAT_MODEL_RISK_MATRIX.md) for details." >> security-report.md
 
       - name: Upload Report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-test-report
           path: security-report.md

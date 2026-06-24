@@ -1,0 +1,79 @@
+# DestinationRules — traffic policies per service.
+#
+# Enforces:
+#   - ISTIO_MUTUAL TLS for all HTTP services (works with PeerAuthentication STRICT)
+#   - Connection pool limits to prevent cascade failures
+#   - Outlier detection (circuit breaker) to eject unhealthy hosts
+
+# ── backend ───────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: backend
+  namespace: nova-launch
+spec:
+  host: backend
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 200
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+# ── gateway ───────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: gateway
+  namespace: nova-launch
+spec:
+  host: gateway
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 200
+        http2MaxRequests: 400
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+# ── frontend ──────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: frontend
+  namespace: nova-launch
+spec:
+  host: frontend
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 100
+---
+# ── redis (TCP — no mTLS upgrade, passthrough) ────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: redis
+  namespace: nova-launch
+spec:
+  host: redis
+  trafficPolicy:
+    tls:
+      mode: DISABLE   # Redis does not speak TLS by default
+    connectionPool:
+      tcp:
+        maxConnections: 50
+        connectTimeout: 3s

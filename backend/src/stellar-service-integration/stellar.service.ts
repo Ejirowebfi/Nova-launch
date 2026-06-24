@@ -20,13 +20,19 @@ import {
   StellarTimeoutException,
   StellarTransactionFailedException,
 } from "./stellar.exceptions";
-import { RateLimiter } from "./rate-limiter";
+import { 
+  RateLimiter, 
+  BACKGROUND_RETRY_CONFIG,
+  calculateBackoffDelay,
+  isRetryableError,
+  sleep
+} from "./rate-limiter";
+import { CircuitBreaker } from "../lib/circuitBreaker";
 import {
   assertValidAddress,
   isValidAddress,
-  calculateBackoff,
-  sleep,
 } from "./stellar.utils";
+import { SequenceNumberCache } from "./sequence-number-cache";
 
 @Injectable()
 export class StellarService implements OnModuleInit {
@@ -35,6 +41,8 @@ export class StellarService implements OnModuleInit {
   private horizon: StellarSdk.Horizon.Server;
   private soroban: StellarSdk.rpc.Server;
   private readonly rateLimiter: RateLimiter;
+  private readonly circuitBreaker: CircuitBreaker;
+  private readonly sequenceCache: SequenceNumberCache;
 
   constructor(private readonly configService: ConfigService) {
     this.config = {
@@ -75,12 +83,28 @@ export class StellarService implements OnModuleInit {
           this.configService.get<number>("STELLAR_RATE_LIMIT_WINDOW_MS") ??
           DEFAULT_STELLAR_CONFIG.rateLimit.windowMs,
       },
+      circuitBreaker: {
+        failureThreshold:
+          this.configService.get<number>("STELLAR_CIRCUIT_BREAKER_FAILURE_THRESHOLD") ??
+          DEFAULT_STELLAR_CONFIG.circuitBreaker.failureThreshold,
+        successThreshold:
+          this.configService.get<number>("STELLAR_CIRCUIT_BREAKER_SUCCESS_THRESHOLD") ??
+          DEFAULT_STELLAR_CONFIG.circuitBreaker.successThreshold,
+        timeoutMs:
+          this.configService.get<number>("STELLAR_CIRCUIT_BREAKER_TIMEOUT_MS") ??
+          DEFAULT_STELLAR_CONFIG.circuitBreaker.timeoutMs,
+      },
     };
 
     this.rateLimiter = new RateLimiter(
       this.config.rateLimit.maxRequests,
       this.config.rateLimit.windowMs
     );
+
+    this.circuitBreaker = new CircuitBreaker(this.config.circuitBreaker);
+    
+    // Initialize sequence number cache (5 min TTL)
+    this.sequenceCache = new SequenceNumberCache(300000);
   }
 
   onModuleInit(): void {
@@ -101,6 +125,58 @@ export class StellarService implements OnModuleInit {
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
+
+  /**
+   * Get account with sequence number management.
+   * Uses cached sequence if available, fetches from network otherwise.
+   * 
+   * @param accountId - Account public key
+   * @returns Account object with current sequence number
+   */
+  async getAccountWithSequence(accountId: string): Promise<StellarSdk.Horizon.AccountResponse> {
+    assertValidAddress(accountId);
+    
+    return this.sequenceCache.executeWithSequenceManagement(
+      accountId,
+      async () => {
+        this.rateLimiter.checkLimit();
+        return await this.horizon.loadAccount(accountId);
+      },
+      async (account) => account
+    );
+  }
+
+  /**
+   * Execute a transaction with automatic sequence number management.
+   * Handles locking, caching, incrementing, and refresh on mismatch.
+   * 
+   * @param accountId - Source account public key
+   * @param buildTransaction - Function that builds and signs the transaction
+   * @returns Transaction submission result
+   */
+  async executeTransaction<T = any>(
+    accountId: string,
+    buildTransaction: (account: StellarSdk.Horizon.AccountResponse) => Promise<StellarSdk.Transaction>
+  ): Promise<{ hash: string; result: T }> {
+    assertValidAddress(accountId);
+
+    return this.sequenceCache.executeWithSequenceManagement(
+      accountId,
+      async () => {
+        this.rateLimiter.checkLimit();
+        return await this.horizon.loadAccount(accountId);
+      },
+      async (account) => {
+        const transaction = await buildTransaction(account);
+        const response = await this.horizon.submitTransaction(transaction);
+        
+        return {
+          hash: response.hash,
+          result: response as any,
+        };
+      }
+    );
+  }
 
   /**
    * Validates a Stellar address (account or contract).
@@ -435,57 +511,71 @@ export class StellarService implements OnModuleInit {
   }
 
   /**
-   * Wraps an async operation with retry + exponential backoff logic.
+   * Wraps an async operation with circuit breaker and retry + exponential backoff logic.
+   * Uses background retry configuration for resilient polling.
    */
   private async withRetry<T>(
     operation: () => Promise<T>,
     operationName: string
   ): Promise<T> {
-    let lastError: unknown;
+    return this.circuitBreaker.execute(async () => {
+      const config = BACKGROUND_RETRY_CONFIG;
+      let lastError: unknown;
 
-    for (let attempt = 0; attempt < this.config.retry.maxAttempts; attempt++) {
-      try {
-        const result = await Promise.race<T>([
-          operation(),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new StellarTimeoutException(operationName)),
-              this.config.requestTimeout
-            )
-          ),
-        ]);
-        return result;
-      } catch (error) {
-        lastError = error;
+      for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
+        try {
+          const result = await Promise.race<T>([
+            operation(),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new StellarTimeoutException(operationName)),
+                this.config.requestTimeout
+              )
+            ),
+          ]);
+          
+          if (attempt > 1) {
+            this.logger.log(
+              `${operationName} succeeded on attempt ${attempt}/${config.maxAttempts}`
+            );
+          }
+          
+          return result;
+        } catch (error) {
+          lastError = error;
 
-        // Don't retry on validation or not-found errors
-        if (
-          error instanceof StellarTimeoutException ||
-          (error as any)?.code === "INVALID_ADDRESS" ||
-          (error as any)?.status === 404
-        ) {
-          throw error;
-        }
+          // Check if error is retryable
+          const retryable = isRetryableError(error);
+          
+          if (!retryable || attempt === config.maxAttempts) {
+            if (!retryable) {
+              this.logger.error(
+                `${operationName} failed with terminal error (not retryable)`,
+                error
+              );
+            } else {
+              this.logger.error(
+                `${operationName} failed after ${config.maxAttempts} attempts`,
+                error
+              );
+            }
+            throw error;
+          }
 
-        if (attempt < this.config.retry.maxAttempts - 1) {
-          const delay = calculateBackoff(
-            attempt,
-            this.config.retry.initialDelay,
-            this.config.retry.maxDelay,
-            this.config.retry.backoffFactor
-          );
+          const delay = calculateBackoffDelay(attempt, config);
           this.logger.warn(
-            `${operationName} failed (attempt ${attempt + 1}/${this.config.retry.maxAttempts}). Retrying in ${delay}ms...`
+            `${operationName} failed (attempt ${attempt}/${config.maxAttempts}). ` +
+            `Retrying in ${Math.round(delay)}ms... Error: ${error instanceof Error ? error.message : String(error)}`
           );
           await sleep(delay);
         }
       }
-    }
 
-    this.logger.error(
-      `${operationName} failed after ${this.config.retry.maxAttempts} attempts`
-    );
-    throw lastError;
+      this.logger.error(
+        `${operationName} failed after ${config.maxAttempts} attempts`
+      );
+      throw lastError;
+    });
   }
 
   /**

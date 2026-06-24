@@ -3,6 +3,8 @@
  * Handles polling and status updates for Stellar transactions
  */
 
+import { isRetryableError, calculateBackoffDelay, USER_RETRY_CONFIG } from '../utils/retry';
+
 export interface TransactionStatusUpdate {
     hash: string;
     status: 'pending' | 'success' | 'failed' | 'timeout';
@@ -12,9 +14,9 @@ export interface TransactionStatusUpdate {
 }
 
 export interface MonitoringConfig {
-    pollingInterval: number; // milliseconds
+    pollingInterval: number;
     maxRetries: number;
-    timeout: number; // milliseconds
+    timeout: number;
     backoffMultiplier: number;
 }
 
@@ -31,8 +33,38 @@ export interface MonitoringSession {
 
 export type StatusCallback = (update: TransactionStatusUpdate) => void;
 export type ErrorCallback = (error: Error) => void;
-/** Called once when a transaction reaches a terminal on-chain state (success or failed). */
 export type PostConfirmationHook = (update: TransactionStatusUpdate) => void;
+
+export interface RPCTransport {
+    getTransaction(hash: string): Promise<any>;
+}
+
+export class DefaultRPCTransport implements RPCTransport {
+    async getTransaction(hash: string): Promise<any> {
+        const network = import.meta.env.VITE_NETWORK || 'testnet';
+        const rpcUrl = network === 'mainnet' 
+            ? 'https://soroban-mainnet.stellar.org' 
+            : 'https://soroban-testnet.stellar.org';
+        
+        const response = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0', id: 1, method: 'getTransaction', params: [hash],
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`RPC request failed: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (data.error) {
+            throw new Error(data.error.message || 'RPC error');
+        }
+        return data.result;
+    }
+}
 
 /**
  * Default monitoring configuration
@@ -55,12 +87,18 @@ export class TransactionMonitor {
     private postConfirmationHooks: Map<string, Set<PostConfirmationHook>> = new Map();
     private pollTimers: Map<string, NodeJS.Timeout> = new Map();
     private config: MonitoringConfig;
+    private transport: RPCTransport;
 
-    constructor(config: Partial<MonitoringConfig> = {}) {
+    constructor(config: Partial<MonitoringConfig> = {}, transport?: RPCTransport) {
         this.config = {
             ...DEFAULT_MONITORING_CONFIG,
             ...config,
         };
+        this.transport = transport || new DefaultRPCTransport();
+    }
+
+    setTransport(transport: RPCTransport): void {
+        this.transport = transport;
     }
 
     /**
@@ -210,7 +248,7 @@ export class TransactionMonitor {
                 this.emitStatus(transactionHash, status);
                 this.emitPostConfirmation(transactionHash, status);
             } else {
-                // Still pending, schedule next poll
+                // Still pending, schedule next poll with exponential backoff
                 const delay = this.calculateDelay(session.attempts);
                 const timer = setTimeout(
                     () => this.poll(transactionHash),
@@ -220,11 +258,24 @@ export class TransactionMonitor {
             }
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
+            
+            // Check if error is retryable
+            const retryable = isRetryableError(error);
+            
+            if (!retryable) {
+                // Terminal error - stop monitoring and surface to UI
+                this.updateSession(transactionHash, 'failed', undefined, err.message);
+                this.emitStatus(transactionHash, 'failed', err.message);
+                this.emitError(transactionHash, err);
+                return;
+            }
+            
+            // Transient error - emit error but continue retrying
             this.emitError(transactionHash, err);
 
-            // Schedule retry
+            // Schedule retry with backoff
             if (session.attempts < this.config.maxRetries) {
-                const delay = this.calculateDelay(session.attempts);
+                const delay = calculateBackoffDelay(session.attempts, USER_RETRY_CONFIG);
                 const timer = setTimeout(
                     () => this.poll(transactionHash),
                     delay
@@ -244,47 +295,14 @@ export class TransactionMonitor {
         transactionHash: string
     ): Promise<'pending' | 'success' | 'failed'> {
         try {
-            const response = await this.fetchTransactionFromRPC(transactionHash);
+            const response = await this.transport.getTransaction(transactionHash);
             return this.mapRPCStatusToMonitorStatus(response);
         } catch (error) {
-            // If transaction not found, it's still pending
             if (error instanceof Error && error.message.includes('not found')) {
                 return 'pending';
             }
             throw error;
         }
-    }
-
-    /**
-     * Fetch transaction from Soroban RPC
-     */
-    private async fetchTransactionFromRPC(hash: string): Promise<any> {
-        const rpcUrl = this.getRPCUrl();
-        
-        const response = await fetch(rpcUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'getTransaction',
-                params: [hash],
-            }),
-        });
-
-        if (!response.ok) {
-            throw new Error(`RPC request failed: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        
-        if (data.error) {
-            throw new Error(data.error.message || 'RPC error');
-        }
-
-        return data.result;
     }
 
     /**
@@ -316,7 +334,7 @@ export class TransactionMonitor {
         const network = import.meta.env.VITE_NETWORK || 'testnet';
         
         if (network === 'mainnet') {
-            return 'https://soroban-rpc.mainnet.stellar.gateway.fm';
+            return 'https://soroban-mainnet.stellar.org';
         }
         
         return 'https://soroban-testnet.stellar.org';
@@ -435,6 +453,39 @@ export class TransactionMonitor {
                 }
             });
         }
+    }
+
+    /**
+     * Verify a transaction receipt and return a typed result.
+     * Polls until the transaction reaches a terminal state (success/failed/timeout).
+     * Use this after submission to confirm on-chain outcome before surfacing success to the user.
+     */
+    async verifyTransactionReceipt(
+        transactionHash: string,
+        timeoutMs: number = this.config.timeout
+    ): Promise<{ status: 'success' | 'failed' | 'timeout'; error?: string }> {
+        const deadline = Date.now() + timeoutMs;
+        let attempts = 0;
+
+        while (Date.now() < deadline && attempts < this.config.maxRetries) {
+            attempts++;
+            try {
+                const status = await this.checkTransactionStatus(transactionHash);
+                if (status === 'success') return { status: 'success' };
+                if (status === 'failed') return { status: 'failed', error: 'Transaction failed on-chain' };
+            } catch (error) {
+                const err = error instanceof Error ? error : new Error(String(error));
+                if (!isRetryableError(error)) {
+                    return { status: 'failed', error: err.message };
+                }
+            }
+            const delay = calculateBackoffDelay(attempts, USER_RETRY_CONFIG);
+            await new Promise((resolve) =>
+                setTimeout(resolve, Math.min(delay, this.config.pollingInterval))
+            );
+        }
+
+        return { status: 'timeout', error: 'Transaction confirmation timed out' };
     }
 
     /**

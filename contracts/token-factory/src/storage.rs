@@ -3,6 +3,45 @@ use soroban_sdk::{Address, Env};
 use crate::types::{BuybackCampaign, DataKey, Error, FactoryState, TokenInfo};
 
 // ============================================================
+// TTL Bump Constants (#1128)
+// ============================================================
+// Soroban ledger entries expire unless their TTL is extended.
+// Instance storage holds core admin state and must outlive any
+// individual token or stream. Persistent storage holds per-token
+// data that should survive at least one full governance cycle.
+//
+// Ledger closes roughly every 5 seconds on Stellar mainnet.
+// INSTANCE_TTL_BUMP  = ~1 year  (6_307_200 ledgers)
+// PERSISTENT_TTL_BUMP = ~30 days (518_400 ledgers)
+// INSTANCE_TTL_THRESHOLD  = trigger bump when < ~6 months remaining
+// PERSISTENT_TTL_THRESHOLD = trigger bump when < ~7 days remaining
+// ============================================================
+
+/// Minimum remaining TTL before an instance entry is bumped (~6 months).
+pub const INSTANCE_TTL_THRESHOLD: u32 = 3_153_600;
+/// Target TTL for instance storage entries (~1 year).
+pub const INSTANCE_TTL_BUMP: u32 = 6_307_200;
+
+/// Minimum remaining TTL before a persistent entry is bumped (~7 days).
+pub const PERSISTENT_TTL_THRESHOLD: u32 = 120_960;
+/// Target TTL for persistent storage entries (~30 days).
+pub const PERSISTENT_TTL_BUMP: u32 = 518_400;
+
+/// Extend instance storage TTL if below threshold.
+pub fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+}
+
+/// Extend a persistent entry's TTL if below threshold.
+pub fn bump_persistent<K: soroban_sdk::TryIntoVal<Env, soroban_sdk::Val> + soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
+}
+
+// ============================================================
 // Storage Functions - Burn Tracking
 // ============================================================
 // Available functions:
@@ -18,10 +57,12 @@ use crate::types::{BuybackCampaign, DataKey, Error, FactoryState, TokenInfo};
 
 // Admin management
 pub fn get_admin(env: &Env) -> Address {
+    bump_instance(env);
     env.storage().instance().get(&DataKey::Admin).unwrap()
 }
 
 pub fn set_admin(env: &Env, admin: &Address) {
+    bump_instance(env);
     env.storage().instance().set(&DataKey::Admin, admin);
 }
 
@@ -55,6 +96,24 @@ pub fn set_treasury(env: &Env, treasury: &Address) {
     env.storage().instance().set(&DataKey::Treasury, treasury);
 }
 
+// Fee token management
+pub fn get_fee_token(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::FeeToken)
+}
+
+pub fn set_fee_token(env: &Env, token: &Address) {
+    env.storage().instance().set(&DataKey::FeeToken, token);
+}
+
+// Governance management
+pub fn get_governance(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Governance)
+}
+
+pub fn set_governance(env: &Env, governance: &Address) {
+    env.storage().instance().set(&DataKey::Governance, governance);
+}
+
 // Fee management
 pub fn get_base_fee(env: &Env) -> i128 {
     env.storage().instance().get(&DataKey::BaseFee).unwrap()
@@ -81,10 +140,12 @@ pub fn get_token_count(env: &Env) -> u32 {
 }
 
 pub fn get_token_info(env: &Env, index: u32) -> Option<TokenInfo> {
+    bump_instance(env);
     env.storage().instance().get(&DataKey::Token(index))
 }
 
 pub fn set_token_info(env: &Env, index: u32, info: &TokenInfo) {
+    bump_instance(env);
     env.storage().instance().set(&DataKey::Token(index), info);
 
     // Index by creator for pagination
@@ -587,17 +648,18 @@ mod burn_security_tests {
 // ── Burn feature additions ─────────────────────────────────
 
 pub fn get_balance(env: &Env, token_index: u32, holder: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&crate::types::DataKey::Balance(token_index, holder.clone()))
-        .unwrap_or(0)
+    let key = crate::types::DataKey::Balance(token_index, holder.clone());
+    let val = env.storage().persistent().get(&key).unwrap_or(0);
+    if env.storage().persistent().has(&key) {
+        bump_persistent(env, &key);
+    }
+    val
 }
 
 pub fn set_balance(env: &Env, token_index: u32, holder: &Address, balance: i128) {
-    env.storage().persistent().set(
-        &crate::types::DataKey::Balance(token_index, holder.clone()),
-        &balance,
-    );
+    let key = crate::types::DataKey::Balance(token_index, holder.clone());
+    env.storage().persistent().set(&key, &balance);
+    bump_persistent(env, &key);
 }
 
 pub fn get_burn_count(env: &Env, token_index: u32) -> u32 {
@@ -1230,15 +1292,33 @@ pub fn get_vote(env: &Env, proposal_id: u64, voter: &Address) -> Option<crate::t
 }
 
 // ============================================================
-// Storage Functions - Address Freezing
+// Storage Functions - Address Freezing (Transfer Restrictions)
 // ============================================================
+// Frozen addresses are blacklisted from token transfers, burns, and mints.
+// The freeze state is stored per (token_address, address) pair using
+// persistent storage so it survives ledger entry expiry.
 
-pub fn is_address_frozen(_env: &Env, _token_address: &Address, _address: &Address) -> bool {
-    false
+/// Returns true if `address` is frozen (blacklisted) for `token_address`.
+pub fn is_address_frozen(env: &Env, token_address: &Address, address: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::FrozenAddress(
+            token_address.clone(),
+            address.clone(),
+        ))
+        .unwrap_or(false)
 }
 
-pub fn set_address_frozen(_env: &Env, _token_address: &Address, _address: &Address, _frozen: bool) {
-    // Stub implementation
+/// Set the frozen (blacklist) state for `address` on `token_address`.
+/// `frozen = true` blacklists the address; `frozen = false` removes the restriction.
+pub fn set_address_frozen(env: &Env, token_address: &Address, address: &Address, frozen: bool) {
+    let key = crate::types::DataKey::FrozenAddress(token_address.clone(), address.clone());
+    if frozen {
+        env.storage().persistent().set(&key, &true);
+    } else {
+        // Remove the entry entirely when unfreezing to reclaim storage
+        env.storage().persistent().remove(&key);
+    }
 }
 
 // ── Governance storage functions ───────────────────────────
@@ -1260,6 +1340,50 @@ pub fn set_governance_config(env: &Env, config: &crate::types::GovernanceConfig)
     env.storage()
         .instance()
         .set(&DataKey::GovernanceConfig, config);
+}
+
+// ── Dynamic quorum storage functions ──────────────────────
+
+/// Get dynamic quorum configuration (defaults to disabled).
+pub fn get_dynamic_quorum_config(env: &Env) -> crate::types::DynamicQuorumConfig {
+    env.storage()
+        .instance()
+        .get(&DataKey::DynamicQuorumConfig)
+        .unwrap_or(crate::types::DynamicQuorumConfig {
+            enabled: false,
+            min_quorum_percent: 10,
+            max_quorum_percent: 80,
+            target_participation: 30,
+            window_size: 5,
+        })
+}
+
+/// Persist dynamic quorum configuration.
+pub fn set_dynamic_quorum_config(env: &Env, config: &crate::types::DynamicQuorumConfig) {
+    env.storage()
+        .instance()
+        .set(&DataKey::DynamicQuorumConfig, config);
+}
+
+/// Store a participation record for a concluded proposal.
+pub fn set_participation_record(
+    env: &Env,
+    proposal_id: u64,
+    record: &crate::types::ParticipationRecord,
+) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::ParticipationRecord(proposal_id), record);
+}
+
+/// Retrieve a participation record by proposal ID.
+pub fn get_participation_record(
+    env: &Env,
+    proposal_id: u64,
+) -> Option<crate::types::ParticipationRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ParticipationRecord(proposal_id))
 }
 
 // ── Milestone Verification (Stub Testing) ────────────────────────────────────────────────────────────────────
@@ -1387,4 +1511,351 @@ pub fn decrement_active_campaign_count(env: &Env) -> Result<u32, Error> {
     let new_count = count - 1;
     set_active_campaign_count(env, new_count);
     Ok(new_count)
+}
+// ============================================================
+// Fractionalization Storage Functions
+// ============================================================
+
+/// Get fractional vault by ID
+pub fn get_fractional_vault(env: &Env, vault_id: u64) -> Option<crate::types::FractionalVault> {
+    env.storage().persistent().get(&crate::types::DataKey::FractionalVault(vault_id))
+}
+
+/// Set fractional vault
+pub fn set_fractional_vault(env: &Env, vault_id: u64, vault: &crate::types::FractionalVault) -> Result<(), Error> {
+    env.storage().persistent().set(&crate::types::DataKey::FractionalVault(vault_id), vault);
+    Ok(())
+}
+
+/// Get fractional vault count
+pub fn get_fractional_vault_count(env: &Env) -> u64 {
+    env.storage().instance().get(&crate::types::DataKey::FractionalVaultCount).unwrap_or(0)
+}
+
+/// Increment fractional vault count
+pub fn increment_fractional_vault_count(env: &Env) -> Result<u64, Error> {
+    let current = get_fractional_vault_count(env);
+    let new_count = current.checked_add(1).ok_or(Error::ArithmeticError)?;
+    env.storage().instance().set(&crate::types::DataKey::FractionalVaultCount, &new_count);
+    Ok(new_count)
+}
+
+/// Get owner's fractional vault count
+pub fn get_owner_fractional_vault_count(env: &Env, owner: &Address) -> u32 {
+    env.storage().persistent().get(&crate::types::DataKey::OwnerFractionalVaultCount(owner.clone())).unwrap_or(0)
+}
+
+/// Increment owner's fractional vault count
+pub fn increment_owner_fractional_vault_count(env: &Env, owner: &Address) -> Result<u32, Error> {
+    let current = get_owner_fractional_vault_count(env, owner);
+    let new_count = current.checked_add(1).ok_or(Error::ArithmeticError)?;
+    env.storage().persistent().set(&crate::types::DataKey::OwnerFractionalVaultCount(owner.clone()), &new_count);
+    Ok(new_count)
+}
+
+/// Set fractional vault by owner
+pub fn set_fractional_vault_by_owner(env: &Env, owner: &Address, index: u32, vault_id: u64) {
+    env.storage().persistent().set(&crate::types::DataKey::FractionalVaultByOwner(owner.clone(), index), &vault_id);
+}
+
+/// Get vault ID for an asset
+pub fn get_asset_vault(env: &Env, asset_id: &soroban_sdk::BytesN<32>) -> Option<u64> {
+    env.storage().persistent().get(&crate::types::DataKey::AssetToVault(asset_id.clone()))
+}
+
+/// Set asset to vault mapping
+pub fn set_asset_to_vault(env: &Env, asset_id: &soroban_sdk::BytesN<32>, vault_id: u64) {
+    env.storage().persistent().set(&crate::types::DataKey::AssetToVault(asset_id.clone()), &vault_id);
+}
+
+/// Remove asset to vault mapping
+pub fn remove_asset_to_vault(env: &Env, asset_id: &soroban_sdk::BytesN<32>) {
+    env.storage().persistent().remove(&crate::types::DataKey::AssetToVault(asset_id.clone()));
+}
+
+// ============================================================
+// Role-Based Access Control
+// ============================================================
+
+fn role_discriminant(role: crate::types::Role) -> u32 {
+    match role {
+        crate::types::Role::MetadataManager => 0,
+        crate::types::Role::Pauser => 1,
+        crate::types::Role::Minter => 2,
+    }
+}
+
+pub fn has_role(env: &Env, token_index: u32, address: &Address, role: crate::types::Role) -> bool {
+    let key = crate::types::DataKey::TokenRole(token_index, address.clone(), role_discriminant(role));
+    env.storage().persistent().get::<_, bool>(&key).unwrap_or(false)
+}
+
+pub fn grant_role(env: &Env, token_index: u32, address: &Address, role: crate::types::Role) {
+    let key = crate::types::DataKey::TokenRole(token_index, address.clone(), role_discriminant(role));
+    env.storage().persistent().set(&key, &true);
+}
+
+pub fn revoke_role(env: &Env, token_index: u32, address: &Address, role: crate::types::Role) {
+    let key = crate::types::DataKey::TokenRole(token_index, address.clone(), role_discriminant(role));
+    env.storage().persistent().remove(&key);
+}
+
+// ============================================================
+// Metadata History
+// ============================================================
+
+pub fn push_metadata_history(
+    env: &Env,
+    token_index: u32,
+    record: &crate::types::MetadataRecord,
+) -> Result<(), crate::types::Error> {
+    let count_key = crate::types::DataKey::MetadataHistoryCount(token_index);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let new_count = count.checked_add(1).ok_or(crate::types::Error::ArithmeticError)?;
+    let entry_key = crate::types::DataKey::MetadataHistory(token_index, count);
+    env.storage().persistent().set(&entry_key, record);
+    env.storage().persistent().set(&count_key, &new_count);
+    Ok(())
+}
+
+pub fn get_metadata_history(
+    env: &Env,
+    token_index: u32,
+    version: u32,
+) -> Option<crate::types::MetadataRecord> {
+    // version is 1-based; stored at index version-1
+    let idx = version.checked_sub(1)?;
+    let key = crate::types::DataKey::MetadataHistory(token_index, idx);
+    env.storage().persistent().get(&key)
+}
+
+// ============================================================
+// Reentrancy Guard
+// ============================================================
+
+pub fn acquire_reentrancy_lock(env: &Env) -> Result<(), crate::types::Error> {
+    let key = crate::types::DataKey::ReentrancyLock;
+    if env.storage().instance().get::<_, bool>(&key).unwrap_or(false) {
+        return Err(crate::types::Error::InvalidParameters);
+    }
+    env.storage().instance().set(&key, &true);
+    Ok(())
+}
+
+pub fn release_reentrancy_lock(env: &Env) {
+    env.storage().instance().remove(&crate::types::DataKey::ReentrancyLock);
+}
+
+// ============================================================
+// Multi-Sig Storage
+// ============================================================
+
+pub fn get_multisig_config(env: &Env) -> Option<crate::types::MultiSigConfig> {
+    env.storage().instance().get(&crate::types::DataKey::MultiSigConfig)
+}
+
+pub fn set_multisig_config(env: &Env, config: &crate::types::MultiSigConfig) {
+    env.storage().instance().set(&crate::types::DataKey::MultiSigConfig, config);
+}
+
+pub fn has_multisig_config(env: &Env) -> bool {
+    env.storage().instance().has(&crate::types::DataKey::MultiSigConfig)
+}
+
+pub fn next_multisig_proposal_id(env: &Env) -> u64 {
+    let key = crate::types::DataKey::MultiSigProposalCount;
+    env.storage().instance().get::<_, u64>(&key).unwrap_or(0)
+}
+
+pub fn increment_multisig_proposal_id(env: &Env) -> u64 {
+    let key = crate::types::DataKey::MultiSigProposalCount;
+    let id: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    env.storage().instance().set(&key, &(id + 1));
+    id
+}
+
+pub fn get_multisig_proposal(env: &Env, id: u64) -> Option<crate::types::MultiSigProposal> {
+    env.storage().instance().get(&crate::types::DataKey::MultiSigProposal(id))
+}
+
+pub fn set_multisig_proposal(env: &Env, proposal: &crate::types::MultiSigProposal) {
+    env.storage().instance().set(&crate::types::DataKey::MultiSigProposal(proposal.id), proposal);
+}
+
+pub fn has_multisig_approval(env: &Env, proposal_id: u64, approver: &Address) -> bool {
+    let key = crate::types::DataKey::MultiSigApproval(proposal_id, approver.clone());
+    env.storage().instance().get::<_, bool>(&key).unwrap_or(false)
+}
+
+pub fn set_multisig_approval(env: &Env, proposal_id: u64, approver: &Address) {
+    let key = crate::types::DataKey::MultiSigApproval(proposal_id, approver.clone());
+    env.storage().instance().set(&key, &true);
+}
+
+// ============================================================
+// Burn Schedule Storage
+// ============================================================
+
+pub fn next_burn_schedule_id(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<_, u64>(&crate::types::DataKey::BurnScheduleCount)
+        .unwrap_or(0)
+}
+
+pub fn increment_burn_schedule_id(env: &Env) -> u64 {
+    let id = next_burn_schedule_id(env);
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::BurnScheduleCount, &(id + 1));
+    id
+}
+
+pub fn get_burn_schedule(env: &Env, id: u64) -> Option<crate::types::BurnSchedule> {
+    env.storage()
+        .instance()
+        .get(&crate::types::DataKey::BurnSchedule(id))
+}
+
+pub fn set_burn_schedule(env: &Env, schedule: &crate::types::BurnSchedule) {
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::BurnSchedule(schedule.id), schedule);
+}
+
+pub fn get_burn_schedule_count_by_token(env: &Env, token_index: u32) -> u32 {
+    env.storage()
+        .instance()
+        .get::<_, u32>(&crate::types::DataKey::BurnScheduleCountByToken(token_index))
+        .unwrap_or(0)
+}
+
+pub fn add_burn_schedule_by_token(env: &Env, token_index: u32, schedule_id: u64) {
+    let count = get_burn_schedule_count_by_token(env, token_index);
+    env.storage().instance().set(
+        &crate::types::DataKey::BurnSchedulesByToken(token_index, count),
+        &schedule_id,
+    );
+    env.storage().instance().set(
+        &crate::types::DataKey::BurnScheduleCountByToken(token_index),
+        &(count + 1),
+    );
+}
+
+pub fn get_burn_schedule_id_by_token(env: &Env, token_index: u32, local_index: u32) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&crate::types::DataKey::BurnSchedulesByToken(token_index, local_index))
+}
+
+// ============================================================
+// Cross-Contract Trusted Caller Storage
+// ============================================================
+
+/// Register a trusted caller address.
+pub fn set_trusted_caller(env: &Env, caller: &Address) {
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::TrustedCaller(caller.clone()), &true);
+}
+
+/// Remove a trusted caller address.
+pub fn remove_trusted_caller(env: &Env, caller: &Address) {
+    env.storage()
+        .instance()
+        .remove(&crate::types::DataKey::TrustedCaller(caller.clone()));
+}
+
+/// Check whether an address is a registered trusted caller.
+pub fn is_trusted_caller(env: &Env, caller: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get::<_, bool>(&crate::types::DataKey::TrustedCaller(caller.clone()))
+        .unwrap_or(false)
+}
+
+// ============================================================
+// Cross-Contract Trusted Caller Storage
+// ============================================================
+
+pub fn set_trusted_caller(env: &Env, caller: &Address) {
+    env.storage()
+        .instance()
+        .set(&crate::types::DataKey::TrustedCaller(caller.clone()), &true);
+}
+
+pub fn remove_trusted_caller(env: &Env, caller: &Address) {
+    env.storage()
+        .instance()
+        .remove(&crate::types::DataKey::TrustedCaller(caller.clone()));
+}
+
+pub fn is_trusted_caller(env: &Env, caller: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get::<_, bool>(&crate::types::DataKey::TrustedCaller(caller.clone()))
+        .unwrap_or(false)
+}
+
+// ============================================================
+// Metadata Content Hash Storage (#1131)
+// ============================================================
+
+/// Store a 32-byte content hash alongside the metadata URI for a token.
+///
+/// The hash allows off-chain consumers to verify that IPFS content has not
+/// been tampered with after registration.
+pub fn set_metadata_content_hash(
+    env: &Env,
+    token_index: u32,
+    hash: &soroban_sdk::BytesN<32>,
+) {
+    env.storage()
+        .persistent()
+        .set(&crate::types::DataKey::MetadataContentHash(token_index), hash);
+}
+
+/// Retrieve the stored content hash for a token's metadata.
+///
+/// Returns `None` if no hash has been registered (metadata not yet set or
+/// set before this feature was introduced).
+pub fn get_metadata_content_hash(
+    env: &Env,
+    token_index: u32,
+) -> Option<soroban_sdk::BytesN<32>> {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::MetadataContentHash(token_index))
+}
+
+// ============================================================
+// Vault Owner Change Storage (#1134)
+// ============================================================
+
+/// Persist a pending vault-owner change proposal.
+pub fn set_pending_vault_owner_change(
+    env: &Env,
+    vault_id: u64,
+    change: &crate::types::PendingVaultOwnerChange,
+) {
+    env.storage()
+        .persistent()
+        .set(&crate::types::DataKey::PendingVaultOwnerChange(vault_id), change);
+}
+
+/// Retrieve a pending vault-owner change proposal.
+pub fn get_pending_vault_owner_change(
+    env: &Env,
+    vault_id: u64,
+) -> Option<crate::types::PendingVaultOwnerChange> {
+    env.storage()
+        .persistent()
+        .get(&crate::types::DataKey::PendingVaultOwnerChange(vault_id))
+}
+
+/// Remove a pending vault-owner change proposal (after execution or cancellation).
+pub fn remove_pending_vault_owner_change(env: &Env, vault_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&crate::types::DataKey::PendingVaultOwnerChange(vault_id));
 }

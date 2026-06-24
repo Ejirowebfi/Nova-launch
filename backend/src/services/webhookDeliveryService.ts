@@ -1,4 +1,6 @@
 import axios, { AxiosError } from "axios";
+import { gzip } from "zlib";
+import { promisify } from "util";
 import {
   WebhookSubscription,
   WebhookPayload,
@@ -6,45 +8,69 @@ import {
   WebhookEventData,
 } from "../types/webhook";
 import webhookService from "./webhookService";
+import webhookDeadLetterService from "./webhookDeadLetterService";
+import { IntegrationMetrics } from "../monitoring/metrics/prometheus-config";
+import { webhookDeliveryLatency } from "../lib/metrics";
+import { CircuitBreaker } from "../lib/circuitBreaker";
+
+const gzipAsync = promisify(gzip);
 
 const TIMEOUT_MS = parseInt(process.env.WEBHOOK_TIMEOUT_MS || "5000");
 const MAX_RETRIES = parseInt(process.env.WEBHOOK_MAX_RETRIES || "3");
 const RETRY_DELAY_MS = parseInt(process.env.WEBHOOK_RETRY_DELAY_MS || "1000");
 
 export class WebhookDeliveryService {
+  private circuitBreaker: CircuitBreaker;
+  // Read at construction time so tests can override via process.env before new WebhookDeliveryService()
+  private readonly compressionThresholdBytes: number;
+
+  constructor() {
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: parseInt(process.env.WEBHOOK_CIRCUIT_BREAKER_FAILURE_THRESHOLD || "5"),
+      successThreshold: parseInt(process.env.WEBHOOK_CIRCUIT_BREAKER_SUCCESS_THRESHOLD || "2"),
+      timeoutMs: parseInt(process.env.WEBHOOK_CIRCUIT_BREAKER_TIMEOUT_MS || "60000"),
+    });
+    // Payloads larger than this threshold (bytes) are gzip-compressed on delivery.
+    this.compressionThresholdBytes = parseInt(
+      process.env.WEBHOOK_COMPRESSION_THRESHOLD_BYTES || "1024"
+    );
+  }
   /**
    * Trigger webhooks for an event
    */
   async triggerEvent(
     event: WebhookEventType,
     data: WebhookEventData,
-    tokenAddress?: string
+    tokenAddress?: string,
+    correlationId?: string
   ): Promise<void> {
     const subscriptions = await webhookService.findMatchingSubscriptions(
       event,
       tokenAddress
     );
 
+    const cid = correlationId || `whk_${Date.now().toString(36)}`;
     console.log(
-      `Found ${subscriptions.length} subscriptions for event ${event}`
+      JSON.stringify({ event: 'webhook.trigger', correlationId: cid, webhookEvent: event, subscriptionCount: subscriptions.length })
     );
 
     // Deliver webhooks in parallel
     await Promise.allSettled(
       subscriptions.map((subscription) =>
-        this.deliverWebhook(subscription, event, data)
+        this.deliverWebhook(subscription, event, data, cid)
       )
     );
   }
 
   /**
-   * Deliver webhook to a single subscription with retry logic
+   * Deliver webhook to a single subscription with circuit breaker and retry logic
    * @internal
    */
   async deliverWebhook(
     subscription: WebhookSubscription,
     event: WebhookEventType,
-    data: WebhookEventData
+    data: WebhookEventData,
+    correlationId?: string
   ): Promise<void> {
     const payload = webhookService.createPayload(
       event,
@@ -52,86 +78,146 @@ export class WebhookDeliveryService {
       subscription.secret
     );
 
-    let lastError: string | null = null;
-    let statusCode: number | null = null;
-    let success = false;
-    let attempts = 0;
+    const cid = correlationId || `whk_${Date.now().toString(36)}`;
+    // Attach correlation ID to payload headers (not body — body is signed)
+    const extraHeaders: Record<string, string> = {
+      'X-Correlation-Id': cid,
+    };
+    // Include originating tx hash if present in data
+    const txHash = (data as unknown as Record<string, unknown>).transactionHash as string | undefined;
+    if (txHash) extraHeaders['X-Tx-Hash'] = txHash;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      attempts = attempt;
-      try {
-        console.log(
-          `Delivering webhook to ${subscription.url} (attempt ${attempt}/${MAX_RETRIES})`
-        );
+    return this.circuitBreaker.execute(async () => {
+      let lastError: string | null = null;
+      let statusCode: number | null = null;
+      let success = false;
+      let attempts = 0;
+      const startMs = Date.now();
 
-        const response = await axios.post(subscription.url, payload, {
-          timeout: TIMEOUT_MS,
-          headers: {
-            "Content-Type": "application/json",
-            "X-Webhook-Signature": payload.signature,
-            "X-Webhook-Event": event,
-            "User-Agent": "Nova-Launch-Webhook/1.0",
-          },
-          validateStatus: (status) => status >= 200 && status < 300,
-        });
+      const rawBody = JSON.stringify(payload);
+      const useCompression = Buffer.byteLength(rawBody, "utf8") >= this.compressionThresholdBytes;
+      let compressedBody: Buffer | null = null;
+      if (useCompression) {
+        compressedBody = await gzipAsync(rawBody) as Buffer;
+      }
 
-        statusCode = response.status;
-        success = true;
-        lastError = null;
+      // Track whether to fall back to uncompressed (e.g. after a 415 response)
+      let compressionDisabled = false;
 
-        console.log(
-          `Webhook delivered successfully to ${subscription.url} (status: ${statusCode})`
-        );
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        attempts = attempt;
+        try {
+          console.log(
+            JSON.stringify({ event: 'webhook.attempt', correlationId: cid, url: subscription.url, attempt, maxRetries: MAX_RETRIES, compressed: useCompression && !compressionDisabled, ...(txHash && { txHash }) })
+          );
 
-        // Update last triggered timestamp
-        await webhookService.updateLastTriggered(subscription.id);
+          const sendCompressed = useCompression && !compressionDisabled && compressedBody !== null;
+          const requestBody = sendCompressed ? compressedBody : rawBody;
+          const contentHeaders: Record<string, string> = sendCompressed
+            ? { "Content-Type": "application/json", "Content-Encoding": "gzip" }
+            : { "Content-Type": "application/json" };
 
-        break; // Success, exit retry loop
-      } catch (error) {
-        const axiosError = error as AxiosError;
-        statusCode = axiosError.response?.status || null;
-        lastError = axiosError.message;
+          const response = await axios.post(subscription.url, requestBody, {
+            timeout: TIMEOUT_MS,
+            headers: {
+              ...contentHeaders,
+              "X-Webhook-Signature": payload.signature,
+              "X-Webhook-Event": event,
+              "User-Agent": "Nova-Launch-Webhook/1.0",
+              ...extraHeaders,
+            },
+            validateStatus: (status) => status >= 200 && status < 300,
+          });
 
-        console.error(
-          `Webhook delivery failed (attempt ${attempt}/${MAX_RETRIES}):`,
-          {
-            url: subscription.url,
-            error: lastError,
-            statusCode,
+          statusCode = response.status;
+          success = true;
+          lastError = null;
+
+          console.log(
+            JSON.stringify({ event: 'webhook.delivered', correlationId: cid, url: subscription.url, statusCode, ...(txHash && { txHash }) })
+          );
+
+          // Update last triggered timestamp
+          await webhookService.updateLastTriggered(subscription.id);
+
+          break; // Success, exit retry loop
+        } catch (error) {
+          const axiosError = error as AxiosError;
+          statusCode = axiosError.response?.status || null;
+          lastError = axiosError.message;
+
+          console.error(
+            JSON.stringify({ event: 'webhook.failed', correlationId: cid, url: subscription.url, attempt, statusCode, error: lastError, ...(txHash && { txHash }) })
+          );
+
+          // 415 Unsupported Media Type — consumer cannot accept encoded content;
+          // disable compression and retry with the uncompressed body.
+          if (statusCode === 415 && useCompression && !compressionDisabled) {
+            compressionDisabled = true;
+            continue;
           }
-        );
 
-        // 4xx errors are non-retryable — stop immediately
-        if (statusCode !== null && statusCode >= 400 && statusCode < 500) {
-          break;
-        }
+          // Other 4xx errors are non-retryable — stop immediately
+          if (statusCode !== null && statusCode >= 400 && statusCode < 500) {
+            break;
+          }
 
-        // Wait before retrying (exponential backoff)
-        if (attempt < MAX_RETRIES) {
-          await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt - 1));
+          // Wait before retrying (exponential backoff)
+          if (attempt < MAX_RETRIES) {
+            await this.delay(RETRY_DELAY_MS * Math.pow(2, attempt - 1));
+          }
         }
       }
-    }
 
-    // Log the delivery attempt
-    await webhookService.logDelivery(
-      subscription.id,
-      event,
-      payload,
-      statusCode,
-      success,
-      attempts,
-      lastError
-    );
+      // Emit delivery metrics
+      const durationMs = Date.now() - startMs;
+      const retries = attempts - 1;
+      const outcome = success ? 'success' : (attempts >= MAX_RETRIES ? 'exhausted' : 'failed');
+      IntegrationMetrics.recordWebhookDelivery(event, outcome, durationMs, retries);
 
-    // Disable subscription after multiple failures
-    if (!success) {
-      console.warn(
-        `Webhook delivery failed after ${MAX_RETRIES} attempts. Consider disabling subscription ${subscription.id}`
+      // Observe end-to-end latency histogram with outcome and attempt count labels.
+      webhookDeliveryLatency.observe(
+        { outcome, attempt_count: String(attempts) },
+        durationMs / 1000
       );
-      // Optionally auto-disable after X consecutive failures
-      // await webhookService.updateSubscriptionStatus(subscription.id, false);
-    }
+
+      // Log the delivery attempt
+      await webhookService.logDelivery(
+        subscription.id,
+        event,
+        payload,
+        statusCode,
+        success,
+        attempts,
+        lastError
+      );
+
+      // Route exhausted deliveries to dead-letter store
+      if (!success && attempts >= MAX_RETRIES) {
+        try {
+          const deadLetterId = await webhookDeadLetterService.storeDeadLetter(
+            subscription.id,
+            event,
+            payload,
+            statusCode,
+            lastError,
+            attempts
+          );
+          IntegrationMetrics.recordWebhookDeadLetter(event);
+          console.warn(
+            JSON.stringify({ event: 'webhook.deadletter', correlationId: cid, deadLetterId, subscriptionId: subscription.id, attempts: MAX_RETRIES, ...(txHash && { txHash }) })
+          );
+        } catch (dlError) {
+          console.error(
+            JSON.stringify({ event: 'webhook.deadletter.error', correlationId: cid, subscriptionId: subscription.id, error: dlError })
+          );
+        }
+      } else if (!success) {
+        console.warn(
+          JSON.stringify({ event: 'webhook.failed', correlationId: cid, subscriptionId: subscription.id, attempts, ...(txHash && { txHash }) })
+        );
+      }
+    });
   }
 
   /**

@@ -50,6 +50,7 @@ pub fn create_stream(env: &Env, creator: &Address, params: &StreamParams) -> Res
         metadata: None,
         cancelled: false,
         paused: false,
+        disputed: false,
     };
 
     // Store stream
@@ -58,10 +59,11 @@ pub fn create_stream(env: &Env, creator: &Address, params: &StreamParams) -> Res
     // Emit event
     events::emit_stream_created(
         env,
-        stream_id,
+        stream_id as u32,
         creator,
         &params.recipient,
         params.total_amount,
+        false, // has_metadata
     );
 
     Ok(stream_id)
@@ -236,15 +238,13 @@ pub fn batch_create_streams(
         return Err(Error::BatchTooLarge);
     }
 
-    // Phase 1: Validate all streams before creating any
-    for stream_params in streams.iter() {
-        validate_stream_params(env, &stream_params)?;
-    }
-
-    // Phase 2: Create all streams (validation passed)
+    // Single pass: Validate and create streams
+    // Soroban natively rolls back if validation fails midway
     let mut stream_ids = Vec::new(env);
 
     for stream_params in streams.iter() {
+        validate_stream_params(env, &stream_params)?;
+        
         let stream_id = storage::get_next_stream_id(env);
 
         let stream = StreamInfo {
@@ -366,7 +366,12 @@ pub fn claim_stream(env: &Env, recipient: &Address, stream_id: u64) -> Result<i1
     }
 
     if stream.paused {
-        return Err(Error::StreamPaused);
+        return Err(Error::TokenPaused);
+    }
+
+    // Block settlement while disputed
+    if stream.disputed {
+        return Err(Error::StreamDisputed);
     }
 
     // Calculate claimable amount
@@ -385,7 +390,7 @@ pub fn claim_stream(env: &Env, recipient: &Address, stream_id: u64) -> Result<i1
     storage::set_stream(env, stream_id, &stream);
 
     // Emit event
-    events::emit_stream_claimed(env, stream_id, recipient, claimable);
+    events::emit_stream_claimed(env, stream_id as u32, recipient, claimable);
 
     Ok(claimable)
 }
@@ -420,7 +425,8 @@ pub fn batch_claim(
 ) -> Result<Vec<i128>, Error> {
     recipient.require_auth();
 
-    // First pass: validate all streams
+    // Phase 1: validate all streams and calculate claimable amounts (1 read per stream)
+    let mut validated_streams = soroban_sdk::Vec::new(env);
     for stream_id in stream_ids.iter() {
         let stream = storage::get_stream(env, stream_id).ok_or(Error::TokenNotFound)?;
 
@@ -433,17 +439,16 @@ pub fn batch_claim(
         if stream.cancelled {
             return Err(Error::InvalidParameters);
         }
-    }
-
-    // Second pass: claim from all eligible streams
-    let mut claimed_amounts = Vec::new(env);
-
-    for stream_id in stream_ids.iter() {
-        let mut stream = storage::get_stream(env, stream_id).unwrap();
 
         // Calculate claimable amount
         let claimable = calculate_claimable(env, &stream)?;
+        validated_streams.push_back((stream_id, stream, claimable));
+    }
 
+    // Phase 2: claim from all eligible streams (mutates and emits events)
+    let mut claimed_amounts = Vec::new(env);
+
+    for (stream_id, mut stream, claimable) in validated_streams.iter() {
         if claimable > 0 {
             // Update claimed amount
             stream.claimed_amount = stream
@@ -454,7 +459,7 @@ pub fn batch_claim(
             storage::set_stream(env, stream_id, &stream);
 
             // Emit event
-            events::emit_stream_claimed(env, stream_id, recipient, claimable);
+            events::emit_stream_claimed(env, stream_id as u32, recipient, claimable);
         }
 
         claimed_amounts.push_back(claimable);
@@ -554,7 +559,8 @@ pub fn cancel_stream(env: &Env, creator: &Address, stream_id: u64) -> Result<(),
     storage::set_stream(env, stream_id, &stream);
 
     // Emit event
-    events::emit_stream_cancelled(env, stream_id, creator);
+    let remaining_amount = stream.total_amount - stream.claimed_amount;
+    events::emit_stream_cancelled(env, stream_id as u32, creator, remaining_amount);
 
     Ok(())
 }
@@ -599,6 +605,69 @@ pub fn unpause_stream(env: &Env, creator: &Address, stream_id: u64) -> Result<()
 
     stream.paused = false;
     storage::set_stream(env, stream_id, &stream);
+
+    Ok(())
+}
+
+/// Raise a dispute on a stream, pausing settlement until resolved.
+///
+/// Either the creator or recipient may raise a dispute. Once disputed,
+/// `claim_stream` returns `StreamDisputed` until an admin resolves it.
+///
+/// # Errors
+/// * `StreamNotFound`       – stream does not exist
+/// * `Unauthorized`         – caller is neither creator nor recipient
+/// * `StreamCancelled`      – stream is already cancelled
+/// * `DisputeAlreadyRaised` – dispute is already active
+pub fn raise_dispute(env: &Env, caller: &Address, stream_id: u64) -> Result<(), Error> {
+    caller.require_auth();
+
+    let mut stream = storage::get_stream(env, stream_id).ok_or(Error::StreamNotFound)?;
+
+    if *caller != stream.creator && *caller != stream.recipient {
+        return Err(Error::Unauthorized);
+    }
+    if stream.cancelled {
+        return Err(Error::StreamCancelled);
+    }
+    if stream.disputed {
+        return Err(Error::DisputeAlreadyRaised);
+    }
+
+    stream.disputed = true;
+    storage::set_stream(env, stream_id, &stream);
+
+    events::emit_stream_dispute_raised(env, stream_id as u32, caller);
+
+    Ok(())
+}
+
+/// Resolve a dispute on a stream, re-enabling settlement.
+///
+/// Only the contract admin may resolve disputes.
+///
+/// # Errors
+/// * `StreamNotFound`   – stream does not exist
+/// * `Unauthorized`     – caller is not the admin
+/// * `StreamNotDisputed`– no active dispute to resolve
+pub fn resolve_dispute(env: &Env, admin: &Address, stream_id: u64) -> Result<(), Error> {
+    admin.require_auth();
+
+    let stored_admin = storage::get_admin(env);
+    if *admin != stored_admin {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut stream = storage::get_stream(env, stream_id).ok_or(Error::StreamNotFound)?;
+
+    if !stream.disputed {
+        return Err(Error::StreamNotDisputed);
+    }
+
+    stream.disputed = false;
+    storage::set_stream(env, stream_id, &stream);
+
+    events::emit_stream_dispute_resolved(env, stream_id as u32, admin);
 
     Ok(())
 }
@@ -904,7 +973,7 @@ mod tests {
 
         // 2. Verify claims are blocked
         let claim_res = claim(&env, &contract_id, &recipient, 1);
-        assert_eq!(claim_res, Err(Error::StreamPaused));
+        assert_eq!(claim_res, Err(Error::TokenPaused));
 
         // 3. Verify Authorization (recipient cannot unpause)
         let unpause_res = unpause(&env, &contract_id, &recipient, 1);
@@ -951,7 +1020,7 @@ mod tests {
         assert_eq!(result, Err(Error::CliffNotReached));
 
         // Keep numeric mapping assertion in sync with current enum layout.
-        assert_eq!(Error::CliffNotReached as u32, 28);
+        assert_eq!(Error::CliffNotReached.0, 20);
     }
 
     #[test]
@@ -1435,5 +1504,131 @@ mod tests {
         assert_eq!(stream3.cliff_time, 150);
         assert_eq!(stream1.cliff_time, stream2.cliff_time);
         assert_eq!(stream2.cliff_time, stream3.cliff_time);
+    }
+}
+
+#[cfg(test)]
+mod dispute_tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
+
+    fn make_stream(env: &Env, creator: &Address, recipient: &Address) -> StreamInfo {
+        StreamInfo {
+            id: 1,
+            creator: creator.clone(),
+            recipient: recipient.clone(),
+            token_index: 0,
+            total_amount: 1_000,
+            claimed_amount: 0,
+            start_time: 0,
+            end_time: 1_000,
+            cliff_time: 0,
+            metadata: None,
+            cancelled: false,
+            paused: false,
+            disputed: false,
+        }
+    }
+
+    fn setup() -> (Env, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, crate::TokenFactory);
+        let admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        client.initialize(&admin, &treasury, &1_000_000_i128, &500_000_i128);
+        (env, contract_id, admin, treasury)
+    }
+
+    #[test]
+    fn raise_dispute_blocks_claim() {
+        let (env, contract_id, admin, _) = setup();
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            storage::set_admin(&env, &admin);
+            let stream = make_stream(&env, &creator, &recipient);
+            storage::set_stream(&env, 1, &stream);
+
+            // Raise dispute as creator
+            raise_dispute(&env, &creator, 1).unwrap();
+
+            // Claim must be blocked
+            env.ledger().set_timestamp(500);
+            let err = claim_stream(&env, &recipient, 1).unwrap_err();
+            assert_eq!(err, Error::StreamDisputed);
+        });
+    }
+
+    #[test]
+    fn resolve_dispute_re_enables_claim() {
+        let (env, contract_id, admin, _) = setup();
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            storage::set_admin(&env, &admin);
+            let stream = make_stream(&env, &creator, &recipient);
+            storage::set_stream(&env, 1, &stream);
+
+            raise_dispute(&env, &recipient, 1).unwrap();
+            resolve_dispute(&env, &admin, 1).unwrap();
+
+            // After resolution, stream is no longer disputed
+            let s = storage::get_stream(&env, 1).unwrap();
+            assert!(!s.disputed);
+        });
+    }
+
+    #[test]
+    fn raise_dispute_unauthorized_fails() {
+        let (env, contract_id, admin, _) = setup();
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            storage::set_admin(&env, &admin);
+            let stream = make_stream(&env, &creator, &recipient);
+            storage::set_stream(&env, 1, &stream);
+
+            let err = raise_dispute(&env, &stranger, 1).unwrap_err();
+            assert_eq!(err, Error::Unauthorized);
+        });
+    }
+
+    #[test]
+    fn double_dispute_fails() {
+        let (env, contract_id, admin, _) = setup();
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            storage::set_admin(&env, &admin);
+            let stream = make_stream(&env, &creator, &recipient);
+            storage::set_stream(&env, 1, &stream);
+
+            raise_dispute(&env, &creator, 1).unwrap();
+            let err = raise_dispute(&env, &creator, 1).unwrap_err();
+            assert_eq!(err, Error::DisputeAlreadyRaised);
+        });
+    }
+
+    #[test]
+    fn resolve_non_disputed_stream_fails() {
+        let (env, contract_id, admin, _) = setup();
+        let creator = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            storage::set_admin(&env, &admin);
+            let stream = make_stream(&env, &creator, &recipient);
+            storage::set_stream(&env, 1, &stream);
+
+            let err = resolve_dispute(&env, &admin, 1).unwrap_err();
+            assert_eq!(err, Error::StreamNotDisputed);
+        });
     }
 }
