@@ -148,6 +148,18 @@ pub struct TokenCreationParams {
     pub metadata_uri: Option<String>,
 }
 
+/// Outcome of validating a single item during a batch pre-flight dry-run.
+///
+/// `index` matches the item's position in the batch input vector.
+/// `error_code` is `0` when the item is valid, otherwise the `Error` code
+/// (see `Error`'s associated constants) it would fail with if executed.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreflightItemResult {
+    pub index: u32,
+    pub error_code: u32,
+}
+
 /// Timelock configuration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

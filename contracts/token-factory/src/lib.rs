@@ -157,8 +157,8 @@ mod vault_deposit_withdraw_test;
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use types::{
     AuctionStatus, BurnAuction, BuybackCampaign, CampaignStatus, ContractMetadata,
-    DynamicQuorumConfig, Error, FactoryState, PaginationCursor, StreamInfo, StreamPage,
-    StreamParams, TokenCreationParams, TokenInfo, TokenStats, Vault, VaultStatus,
+    DynamicQuorumConfig, Error, FactoryState, PaginationCursor, PreflightItemResult, StreamInfo,
+    StreamPage, StreamParams, TokenCreationParams, TokenInfo, TokenStats, Vault, VaultStatus,
 };
 use crate::milestone_verification::MilestoneVerifier;
 use crate::snapshot;
@@ -1330,6 +1330,45 @@ impl TokenFactory {
         let result = batch_operations::batch_settle(&env, creator, token_index, recipients);
         storage::release_reentrancy_lock(&env);
         result
+    }
+
+    /// Dry-run `batch_reveal`'s validation without writing any state.
+    ///
+    /// Lets a caller check which items in a batch would fail — and why —
+    /// before spending gas (or fee payment) on the real call. Performs no
+    /// authorization check and mutates nothing, so it is safe to call
+    /// speculatively.
+    ///
+    /// # Returns
+    /// One [`PreflightItemResult`] per input token (`error_code == 0` means
+    /// that item would succeed), plus an extra entry at `index ==
+    /// tokens.len()` carrying `Error::InsufficientFee` if the fee for the
+    /// valid items would not be covered by `total_fee_payment`.
+    pub fn preflight_batch_reveal(
+        env: Env,
+        tokens: Vec<TokenCreationParams>,
+        total_fee_payment: i128,
+    ) -> Result<Vec<PreflightItemResult>, Error> {
+        batch_operations::preflight_batch_reveal(&env, tokens, total_fee_payment)
+    }
+
+    /// Dry-run `batch_settle`'s validation without writing any state.
+    ///
+    /// Lets a caller check which `(recipient, amount)` pairs would fail —
+    /// and why — before spending gas on the real call. Mutates nothing.
+    ///
+    /// # Returns
+    /// One [`PreflightItemResult`] per input recipient (`error_code == 0`
+    /// means that item would succeed), plus an extra entry at `index ==
+    /// recipients.len()` carrying `Error::MaxSupplyExceeded` if the
+    /// aggregate mint would exceed the token's max supply.
+    pub fn preflight_batch_settle(
+        env: Env,
+        creator: Address,
+        token_index: u32,
+        recipients: Vec<(Address, i128)>,
+    ) -> Result<Vec<PreflightItemResult>, Error> {
+        batch_operations::preflight_batch_settle(&env, creator, token_index, recipients)
     }
 
     /// Set metadata URI for a token by index (creator-only convenience function)

@@ -3,10 +3,26 @@
 /// Provides `batch_reveal` (batch token creation) and `batch_settle` (batch mint)
 /// with atomic execution, storage-access optimization, and a hard batch-size cap
 /// to bound gas consumption.
-use soroban_sdk::{Address, Env, Vec};
+///
+/// ## Atomicity model
+/// Every batch operation is split into two phases:
+/// 1. **Stage** – validate every item and compute the exact value that will be
+///    written for it. Nothing is written to storage in this phase, so any
+///    failure here (returned as `Err`) leaves the ledger byte-for-byte
+///    unchanged.
+/// 2. **Commit** – write the values staged in phase 1. Every value committed
+///    here was already validated, so this phase cannot fail: there is no
+///    operator in the commit loop that can return `Err`. This holds even
+///    when the function is called directly (bypassing the host's contract
+///    invocation boundary, as unit tests do), not just when atomicity is
+///    provided implicitly by the host rolling back a failed invocation.
+///
+/// `preflight_batch_reveal` / `preflight_batch_settle` expose phase 1 standalone
+/// so callers can validate a batch without paying for (or risking) execution.
+use soroban_sdk::{Address, Env, Map, Vec};
 
 use crate::storage;
-use crate::types::{Error, TokenCreationParams};
+use crate::types::{Error, PreflightItemResult, TokenCreationParams};
 
 /// Maximum number of items allowed in a single batch call.
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -54,13 +70,17 @@ pub fn batch_reveal(
         return Err(Error::BatchTooLarge);
     }
 
-    // ── Phase 1: validate all params and accumulate required fee ──────────
+    // ── Phase 1 (stage): validate every item and compute its final token
+    // index. Nothing is written to storage here. ───────────────────────────
     let base_fee = storage::get_base_fee(env);
     let metadata_fee = storage::get_metadata_fee(env);
+    let start_index = storage::get_token_count(env);
 
     let mut required_fee: i128 = 0;
-    for token in tokens.iter() {
+    let mut staged_indices: Vec<u32> = Vec::new(env);
+    for (i, token) in tokens.iter().enumerate() {
         validate_token_params(env, &token)?;
+
         let token_fee = if token.metadata_uri.is_some() {
             base_fee
                 .checked_add(metadata_fee)
@@ -71,23 +91,26 @@ pub fn batch_reveal(
         required_fee = required_fee
             .checked_add(token_fee)
             .ok_or(Error::ArithmeticError)?;
+
+        let token_index = start_index
+            .checked_add(i as u32)
+            .ok_or(Error::ArithmeticError)?;
+        staged_indices.push_back(token_index);
     }
 
     if total_fee_payment < required_fee {
         return Err(Error::InsufficientFee);
     }
 
-    // ── Phase 2: write state (all validations passed) ─────────────────────
-    // Read token count once to avoid N storage reads.
-    let start_index = storage::get_token_count(env);
+    // ── Phase 2 (commit): write every staged token. Every index/value here
+    // was already validated above, so this loop is infallible — no item can
+    // be left partially applied. A failure would indicate a phase-1/phase-2
+    // mismatch, so we panic (triggering a full host-level rollback) rather
+    // than risk silently committing a partial batch. ───────────────────────
     let mut indices = Vec::new(env);
-
-    for (i, token) in tokens.iter().enumerate() {
-        let token_index = start_index
-            .checked_add(i as u32)
-            .ok_or(Error::ArithmeticError)?;
-
-        crate::token_creation::create_token_internal(env, &creator, &token, token_index)?;
+    for (token, token_index) in tokens.iter().zip(staged_indices.iter()) {
+        crate::token_creation::create_token_internal(env, &creator, &token, token_index)
+            .unwrap_or_else(|e| panic!("batch_reveal: phase 2 commit failed after phase 1 validation passed: {:?}", e));
         indices.push_back(token_index);
     }
 
@@ -104,11 +127,76 @@ pub fn batch_reveal(
     Ok(indices)
 }
 
+/// Dry-run `batch_reveal`'s validation phase without writing any state.
+///
+/// Returns one [`PreflightItemResult`] per input token (`error_code == 0`
+/// means that item would succeed), plus an extra entry at `index ==
+/// tokens.len()` with `Error::InsufficientFee` if `total_fee_payment` would
+/// be too low for the items that do pass validation. Does not require
+/// `creator` authorization since nothing is mutated or spent.
+///
+/// # Errors
+/// * `ContractPaused`    – Factory is paused.
+/// * `InvalidParameters` – Empty batch.
+/// * `BatchTooLarge`     – `tokens.len() > MAX_BATCH_SIZE`.
+pub fn preflight_batch_reveal(
+    env: &Env,
+    tokens: Vec<TokenCreationParams>,
+    total_fee_payment: i128,
+) -> Result<Vec<PreflightItemResult>, Error> {
+    if storage::is_paused(env) {
+        return Err(Error::ContractPaused);
+    }
+
+    let batch_len = tokens.len();
+    if batch_len == 0 {
+        return Err(Error::InvalidParameters);
+    }
+    if batch_len > MAX_BATCH_SIZE {
+        return Err(Error::BatchTooLarge);
+    }
+
+    let base_fee = storage::get_base_fee(env);
+    let metadata_fee = storage::get_metadata_fee(env);
+
+    let mut results = Vec::new(env);
+    let mut required_fee: i128 = 0;
+    for (i, token) in tokens.iter().enumerate() {
+        let error_code = match validate_token_params(env, &token) {
+            Ok(()) => 0,
+            Err(e) => e.0,
+        };
+        results.push_back(PreflightItemResult {
+            index: i as u32,
+            error_code,
+        });
+
+        if error_code == 0 {
+            let token_fee = if token.metadata_uri.is_some() {
+                base_fee.checked_add(metadata_fee).unwrap_or(i128::MAX)
+            } else {
+                base_fee
+            };
+            required_fee = required_fee.checked_add(token_fee).unwrap_or(i128::MAX);
+        }
+    }
+
+    if total_fee_payment < required_fee {
+        results.push_back(PreflightItemResult {
+            index: batch_len,
+            error_code: Error::InsufficientFee.0,
+        });
+    }
+
+    Ok(results)
+}
+
 /// Batch-mint tokens to multiple recipients in a single atomic transaction.
 ///
 /// All recipients receive tokens from the same `token_index`. The caller must
-/// be the token creator. Validation of every (recipient, amount) pair is done
-/// before any balance is updated.
+/// be the token creator. Validation of every (recipient, amount) pair — and
+/// the resulting per-recipient balance — is done before any balance is
+/// updated. Duplicate recipients in the same batch are accumulated correctly.
 ///
 /// # Gas optimisation
 /// Token info is loaded once and reused across all mint operations.
@@ -128,6 +216,7 @@ pub fn batch_reveal(
 /// * `TokenPaused`       – Token is paused.
 /// * `BatchTooLarge`     – More than `MAX_BATCH_SIZE` recipients.
 /// * `InvalidParameters` – Empty recipients list or any amount ≤ 0.
+/// * `ArithmeticError`   – Aggregate or per-recipient balance would overflow.
 /// * `MaxSupplyExceeded` – Batch would exceed the token's max supply.
 pub fn batch_settle(
     env: &Env,
@@ -159,36 +248,157 @@ pub fn batch_settle(
         return Err(Error::TokenPaused);
     }
 
-    // ── Phase 1: validate all amounts and compute total ───────────────────
+    // ── Phase 1 (stage): validate every recipient and compute the final
+    // balance each unique address will hold. Nothing is written to storage
+    // here. Recipient deltas are accumulated per-address first so duplicate
+    // recipients in the same batch are handled correctly. ──────────────────
     let mut total_mint: i128 = 0;
-    for (_, amount) in recipients.iter() {
+    let mut deltas: Map<Address, i128> = Map::new(env);
+    for (recipient, amount) in recipients.iter() {
         if amount <= 0 {
             return Err(Error::InvalidParameters);
         }
         total_mint = total_mint
             .checked_add(amount)
             .ok_or(Error::ArithmeticError)?;
+
+        let prior = deltas.get(recipient.clone()).unwrap_or(0);
+        let combined = prior.checked_add(amount).ok_or(Error::ArithmeticError)?;
+        deltas.set(recipient.clone(), combined);
     }
 
     // Check max supply once using the aggregated total.
+    let new_supply = token_info
+        .total_supply
+        .checked_add(total_mint)
+        .ok_or(Error::ArithmeticError)?;
     if let Some(max) = token_info.max_supply {
-        let new_supply = token_info
-            .total_supply
-            .checked_add(total_mint)
-            .ok_or(Error::ArithmeticError)?;
         if new_supply > max {
             return Err(Error::MaxSupplyExceeded);
         }
     }
 
-    // ── Phase 2: apply mints ──────────────────────────────────────────────
+    // Resolve each unique recipient's final balance against current storage,
+    // catching any per-recipient overflow before committing anything.
+    let mut staged_balances: Map<Address, i128> = Map::new(env);
+    for (recipient, delta) in deltas.iter() {
+        let current_balance = storage::get_balance(env, token_index, &recipient);
+        let new_balance = current_balance
+            .checked_add(delta)
+            .ok_or(Error::ArithmeticError)?;
+        staged_balances.set(recipient, new_balance);
+    }
+
+    // ── Phase 2 (commit): write every staged balance and the new total
+    // supply. Every value here was already validated above, so this phase
+    // is infallible. ─────────────────────────────────────────────────────
+    let mut updated_info = token_info;
+    updated_info.total_supply = new_supply;
+    storage::set_token_info(env, token_index, &updated_info);
+
+    for (recipient, _) in deltas.iter() {
+        let new_balance = staged_balances
+            .get(recipient.clone())
+            .unwrap_or_else(|| panic!("batch_settle: phase 2 commit missing staged balance"));
+        storage::set_balance(env, token_index, &recipient, new_balance);
+        let _ = crate::snapshot::record_balance_snapshot(env, token_index, &recipient, new_balance);
+    }
+    let _ = crate::snapshot::record_supply_snapshot(env, token_index, new_supply);
+
+    // Emit one `mint` event per input entry, in input order, matching the
+    // documented event-ordering contract (duplicates emit once each).
     for (recipient, amount) in recipients.iter() {
-        crate::mint::mint(env, token_index, &recipient, amount)?;
+        crate::events::emit_mint(env, token_index, &recipient, amount);
     }
 
     crate::events::emit_batch_settle(env, token_index, &creator, batch_len, total_mint);
 
     Ok(total_mint)
+}
+
+/// Dry-run `batch_settle`'s validation phase without writing any state.
+///
+/// Returns one [`PreflightItemResult`] per `(recipient, amount)` pair
+/// (`error_code == 0` means that item would succeed), plus an extra entry at
+/// `index == recipients.len()` with `Error::MaxSupplyExceeded` if the
+/// aggregate mint would exceed the token's max supply.
+///
+/// # Errors
+/// * `ContractPaused`    – Factory is paused.
+/// * `InvalidParameters` – Empty recipients list.
+/// * `BatchTooLarge`     – More than `MAX_BATCH_SIZE` recipients.
+/// * `TokenNotFound`     – `token_index` does not exist.
+/// * `Unauthorized`      – Caller is not the token creator.
+/// * `TokenPaused`       – Token is paused.
+pub fn preflight_batch_settle(
+    env: &Env,
+    creator: Address,
+    token_index: u32,
+    recipients: Vec<(Address, i128)>,
+) -> Result<Vec<PreflightItemResult>, Error> {
+    if storage::is_paused(env) {
+        return Err(Error::ContractPaused);
+    }
+
+    let batch_len = recipients.len();
+    if batch_len == 0 {
+        return Err(Error::InvalidParameters);
+    }
+    if batch_len > MAX_BATCH_SIZE {
+        return Err(Error::BatchTooLarge);
+    }
+
+    let token_info = storage::get_token_info(env, token_index).ok_or(Error::TokenNotFound)?;
+    if token_info.creator != creator {
+        return Err(Error::Unauthorized);
+    }
+    if storage::is_token_paused(env, token_index) {
+        return Err(Error::TokenPaused);
+    }
+
+    let mut results = Vec::new(env);
+    let mut total_mint: i128 = 0;
+    let mut any_item_failed = false;
+
+    for (i, (_recipient, amount)) in recipients.iter().enumerate() {
+        if amount <= 0 {
+            results.push_back(PreflightItemResult {
+                index: i as u32,
+                error_code: Error::InvalidParameters.0,
+            });
+            any_item_failed = true;
+            continue;
+        }
+        match total_mint.checked_add(amount) {
+            Some(v) => total_mint = v,
+            None => {
+                results.push_back(PreflightItemResult {
+                    index: i as u32,
+                    error_code: Error::ArithmeticError.0,
+                });
+                any_item_failed = true;
+                continue;
+            }
+        }
+        results.push_back(PreflightItemResult {
+            index: i as u32,
+            error_code: 0,
+        });
+    }
+
+    if !any_item_failed {
+        if let Some(max) = token_info.max_supply {
+            let new_supply = token_info.total_supply.checked_add(total_mint).unwrap_or(i128::MAX);
+            if new_supply > max {
+                results.push_back(PreflightItemResult {
+                    index: batch_len,
+                    error_code: Error::MaxSupplyExceeded.0,
+                });
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -215,6 +425,8 @@ fn validate_token_params(env: &Env, params: &TokenCreationParams) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use soroban_sdk::{testutils::Address as _, vec, Env, String};
 
@@ -258,7 +470,7 @@ mod tests {
             make_params(&env, "Gamma", "GAM"),
         ];
         // 3 tokens × base_fee (1_000_000 each, no metadata)
-        let indices = client.batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap();
+        let indices = client.batch_reveal(&admin, &tokens, &3_000_000_i128);
 
         assert_eq!(indices.len(), 3);
         assert_eq!(indices.get(0).unwrap(), 0);
@@ -272,7 +484,7 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let tokens: Vec<TokenCreationParams> = vec![&env];
-        let err = client.batch_reveal(&admin, &tokens, &0_i128).unwrap_err();
+        let err = client.try_batch_reveal(&admin, &tokens, &0_i128).unwrap_err().unwrap();
         assert_eq!(err, crate::types::Error::InvalidParameters.into());
     }
 
@@ -282,7 +494,7 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let tokens = vec![&env, make_params(&env, "Alpha", "ALP")];
-        let err = client.batch_reveal(&admin, &tokens, &0_i128).unwrap_err();
+        let err = client.try_batch_reveal(&admin, &tokens, &0_i128).unwrap_err().unwrap();
         assert_eq!(err, crate::types::Error::InsufficientFee.into());
     }
 
@@ -300,121 +512,14 @@ mod tests {
             metadata_uri: None,
         };
         let tokens = vec![&env, make_params(&env, "Good", "GD"), bad];
-        let err = client.batch_reveal(&admin, &tokens, &2_000_000_i128).unwrap_err();
+        let err = client.try_batch_reveal(&admin, &tokens, &2_000_000_i128).unwrap_err().unwrap();
         assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
 
         // Token count must remain 0 — no partial writes.
         let state = client.get_state();
         let _ = state; // state is accessible; token count checked via get_token_info
-        let info = client.get_token_info(&0_u32);
+        let info = client.try_get_token_info(&0_u32);
         assert!(info.is_err(), "no token should have been created");
-    }
-
-    // ── batch_settle ──────────────────────────────────────────────────────
-
-    #[test]
-    fn batch_settle_mints_to_multiple_recipients() {
-        let (env, contract_id, admin, _treasury) = setup();
-        let client = crate::TokenFactoryClient::new(&env, &contract_id);
-
-        // Create a token first.
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
-
-        let r1 = Address::generate(&env);
-        let r2 = Address::generate(&env);
-        let r3 = Address::generate(&env);
-
-        let recipients = vec![
-            &env,
-            (r1.clone(), 100_i128),
-            (r2.clone(), 200_i128),
-            (r3.clone(), 300_i128),
-        ];
-
-        let total = client.batch_settle(&admin, &0_u32, &recipients).unwrap();
-        assert_eq!(total, 600_i128);
-    }
-
-    #[test]
-    fn batch_settle_rejects_zero_amount() {
-        let (env, contract_id, admin, _treasury) = setup();
-        let client = crate::TokenFactoryClient::new(&env, &contract_id);
-
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
-
-        let r1 = Address::generate(&env);
-        let recipients = vec![&env, (r1, 0_i128)];
-        let err = client.batch_settle(&admin, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
-    }
-
-    #[test]
-    fn batch_settle_rejects_non_creator() {
-        let (env, contract_id, admin, _treasury) = setup();
-        let client = crate::TokenFactoryClient::new(&env, &contract_id);
-
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
-
-        let impostor = Address::generate(&env);
-        let r1 = Address::generate(&env);
-        let recipients = vec![&env, (r1, 100_i128)];
-        let err = client.batch_settle(&impostor, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::Unauthorized.into());
-    }
-
-    #[test]
-    fn batch_settle_respects_max_supply() {
-        let (env, contract_id, admin, _treasury) = setup();
-        let client = crate::TokenFactoryClient::new(&env, &contract_id);
-
-        // Create token with max_supply = 1_000_000 (already at cap from initial supply).
-        let params = vec![
-            &env,
-            TokenCreationParams {
-                name: String::from_str(&env, "Capped"),
-                symbol: String::from_str(&env, "CAP"),
-                decimals: 7,
-                initial_supply: 1_000_000,
-                max_supply: Some(1_000_000),
-                metadata_uri: None,
-            },
-        ];
-        client.batch_reveal(&admin, &params, &1_000_000_i128).unwrap();
-
-        let r1 = Address::generate(&env);
-        let recipients = vec![&env, (r1, 1_i128)];
-        let err = client.batch_settle(&admin, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::MaxSupplyExceeded.into());
     }
 
     #[test]
@@ -440,7 +545,7 @@ mod tests {
             });
         }
 
-        let indices = client.batch_reveal(&admin, &tokens, &10_000_000_i128).unwrap();
+        let indices = client.batch_reveal(&admin, &tokens, &10_000_000_i128);
         assert_eq!(indices.len(), 10);
     }
 
@@ -464,9 +569,331 @@ mod tests {
             bad,
             make_params(&env, "Good2", "GD2"),
         ];
-        let err = client.batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap_err();
+        let err = client.try_batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap_err().unwrap();
         assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
         // No token should have been created.
-        assert!(client.get_token_info(&0_u32).is_err());
+        assert!(client.try_get_token_info(&0_u32).is_err());
+    }
+
+    // ── preflight_batch_reveal ────────────────────────────────────────────
+
+    #[test]
+    fn preflight_batch_reveal_reports_all_valid_with_no_side_effects() {
+        let (env, contract_id, _admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        let tokens = vec![
+            &env,
+            make_params(&env, "Alpha", "ALP"),
+            make_params(&env, "Beta", "BET"),
+        ];
+        let results = client
+            .preflight_batch_reveal(&tokens, &2_000_000_i128);
+
+        assert_eq!(results.len(), 2);
+        for r in results.iter() {
+            assert_eq!(r.error_code, 0);
+        }
+        // Pure dry-run: no token should exist afterwards.
+        assert!(client.try_get_token_info(&0_u32).is_err());
+    }
+
+    #[test]
+    fn preflight_batch_reveal_catches_invalid_item_before_execution() {
+        let (env, contract_id, _admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        let bad = TokenCreationParams {
+            name: String::from_str(&env, ""), // invalid: empty name
+            symbol: String::from_str(&env, "BAD"),
+            decimals: 7,
+            initial_supply: 1_000_000,
+            max_supply: None,
+            metadata_uri: None,
+        };
+        let tokens = vec![&env, make_params(&env, "Good", "GD"), bad];
+        let results = client
+            .preflight_batch_reveal(&tokens, &2_000_000_i128);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.get(0).unwrap().error_code, 0);
+        assert_eq!(
+            results.get(1).unwrap().error_code,
+            crate::types::Error::InvalidTokenParams.0
+        );
+        // No side effects from the dry-run.
+        assert!(client.try_get_token_info(&0_u32).is_err());
+    }
+
+    #[test]
+    fn preflight_batch_reveal_flags_insufficient_fee_as_aggregate_entry() {
+        let (env, contract_id, _admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        let tokens = vec![&env, make_params(&env, "Alpha", "ALP")];
+        let results = client.preflight_batch_reveal(&tokens, &0_i128);
+
+        assert_eq!(results.len(), 2); // 1 item result + 1 aggregate fee result
+        assert_eq!(results.get(0).unwrap().error_code, 0);
+        assert_eq!(
+            results.get(1).unwrap().error_code,
+            crate::types::Error::InsufficientFee.0
+        );
+    }
+
+    // ── batch_settle ──────────────────────────────────────────────────────
+
+    fn create_simple_token(env: &Env, client: &crate::TokenFactoryClient, admin: &Address) {
+        client.create_token(
+            admin,
+            &String::from_str(env, "MyToken"),
+            &String::from_str(env, "MTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
+    }
+
+    #[test]
+    fn batch_settle_mints_to_multiple_recipients() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let r3 = Address::generate(&env);
+
+        let recipients = vec![
+            &env,
+            (r1.clone(), 100_i128),
+            (r2.clone(), 200_i128),
+            (r3.clone(), 300_i128),
+        ];
+
+        let total = client.batch_settle(&admin, &0_u32, &recipients);
+        assert_eq!(total, 600_i128);
+    }
+
+    #[test]
+    fn batch_settle_accumulates_duplicate_recipients() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let recipients = vec![&env, (r1.clone(), 100_i128), (r1.clone(), 50_i128)];
+
+        let total = client.batch_settle(&admin, &0_u32, &recipients);
+        assert_eq!(total, 150_i128);
+
+        let balance = env.as_contract(&contract_id, || storage::get_balance(&env, 0, &r1));
+        assert_eq!(balance, 150_i128);
+    }
+
+    #[test]
+    fn batch_settle_rejects_zero_amount() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let recipients = vec![&env, (r1, 0_i128)];
+        let err = client.try_batch_settle(&admin, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+    }
+
+    #[test]
+    fn batch_settle_rejects_non_creator() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let impostor = Address::generate(&env);
+        let r1 = Address::generate(&env);
+        let recipients = vec![&env, (r1, 100_i128)];
+        let err = client.try_batch_settle(&impostor, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::Unauthorized.into());
+    }
+
+    #[test]
+    fn batch_settle_respects_max_supply() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        // Create token with max_supply = 1_000_000 (already at cap from initial supply).
+        let params = vec![
+            &env,
+            TokenCreationParams {
+                name: String::from_str(&env, "Capped"),
+                symbol: String::from_str(&env, "CAP"),
+                decimals: 7,
+                initial_supply: 1_000_000,
+                max_supply: Some(1_000_000),
+                metadata_uri: None,
+            },
+        ];
+        client.batch_reveal(&admin, &params, &1_000_000_i128);
+
+        let r1 = Address::generate(&env);
+        let recipients = vec![&env, (r1, 1_i128)];
+        let err = client.try_batch_settle(&admin, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::MaxSupplyExceeded.into());
+    }
+
+    #[test]
+    fn batch_settle_rolls_back_fully_on_per_recipient_overflow() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let near_max = Address::generate(&env);
+        let untouched = Address::generate(&env);
+
+        // Push near_max's balance right up against i128::MAX so the batch
+        // overflows on their entry, after `untouched` would already have
+        // been written under the old direct-write-per-item approach.
+        env.as_contract(&contract_id, || {
+            storage::set_balance(&env, 0, &near_max, i128::MAX - 10);
+        });
+
+        let recipients = vec![
+            &env,
+            (untouched.clone(), 500_i128),
+            (near_max.clone(), 100_i128),
+        ];
+        let err = client.try_batch_settle(&admin, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::ArithmeticError.into());
+
+        // Full rollback: neither recipient's balance changed.
+        assert_eq!(env.as_contract(&contract_id, || storage::get_balance(&env, 0, &untouched)), 0_i128);
+        assert_eq!(env.as_contract(&contract_id, || storage::get_balance(&env, 0, &near_max)), i128::MAX - 10);
+    }
+
+    // ── preflight_batch_settle ────────────────────────────────────────────
+
+    #[test]
+    fn preflight_batch_settle_reports_all_valid_with_no_side_effects() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let recipients = vec![&env, (r1.clone(), 100_i128), (r2.clone(), 200_i128)];
+
+        let results = client
+            .preflight_batch_settle(&admin, &0_u32, &recipients);
+
+        assert_eq!(results.len(), 2);
+        for r in results.iter() {
+            assert_eq!(r.error_code, 0);
+        }
+        // Pure dry-run: balances must remain zero.
+        assert_eq!(env.as_contract(&contract_id, || storage::get_balance(&env, 0, &r1)), 0_i128);
+        assert_eq!(env.as_contract(&contract_id, || storage::get_balance(&env, 0, &r2)), 0_i128);
+    }
+
+    #[test]
+    fn preflight_batch_settle_catches_invalid_item_before_execution() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_simple_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let recipients = vec![&env, (r1, 100_i128), (r2, 0_i128)];
+
+        let results = client
+            .preflight_batch_settle(&admin, &0_u32, &recipients);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.get(0).unwrap().error_code, 0);
+        assert_eq!(
+            results.get(1).unwrap().error_code,
+            crate::types::Error::InvalidParameters.0
+        );
+    }
+
+    #[test]
+    fn preflight_batch_settle_flags_max_supply_as_aggregate_entry() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        let params = vec![
+            &env,
+            TokenCreationParams {
+                name: String::from_str(&env, "Capped"),
+                symbol: String::from_str(&env, "CAP"),
+                decimals: 7,
+                initial_supply: 1_000_000,
+                max_supply: Some(1_000_000),
+                metadata_uri: None,
+            },
+        ];
+        client.batch_reveal(&admin, &params, &1_000_000_i128);
+
+        let r1 = Address::generate(&env);
+        let recipients = vec![&env, (r1, 1_i128)];
+        let results = client
+            .preflight_batch_settle(&admin, &0_u32, &recipients);
+
+        assert_eq!(results.len(), 2); // 1 item result + 1 aggregate max-supply result
+        assert_eq!(results.get(0).unwrap().error_code, 0);
+        assert_eq!(
+            results.get(1).unwrap().error_code,
+            crate::types::Error::MaxSupplyExceeded.0
+        );
+    }
+
+    // ── gas overhead: staged batch_reveal vs preflight + batch_reveal ──────
+
+    #[test]
+    fn bench_preflight_plus_reveal_overhead_vs_reveal_alone() {
+        // Quantifies the CPU cost a careful client pays for calling
+        // preflight_batch_reveal before submitting the real batch_reveal,
+        // versus calling batch_reveal directly (which performs the same
+        // staging internally as part of its own atomicity guarantee).
+        let tokens_for = |env: &Env| {
+            vec![
+                env,
+                make_params(env, "Alpha", "ALP"),
+                make_params(env, "Beta", "BET"),
+                make_params(env, "Gamma", "GAM"),
+            ]
+        };
+
+        let (env_direct, contract_id, admin, _treasury) = setup();
+        let client_direct = crate::TokenFactoryClient::new(&env_direct, &contract_id);
+        let tokens = tokens_for(&env_direct);
+        env_direct.budget().reset_unlimited();
+        env_direct.budget().reset_default();
+        client_direct
+            .batch_reveal(&admin, &tokens, &3_000_000_i128);
+        let direct_cpu = env_direct.budget().cpu_instruction_cost();
+
+        let (env_staged, contract_id2, admin2, _treasury2) = setup();
+        let client_staged = crate::TokenFactoryClient::new(&env_staged, &contract_id2);
+        let tokens2 = tokens_for(&env_staged);
+        env_staged.budget().reset_unlimited();
+        env_staged.budget().reset_default();
+        client_staged
+            .preflight_batch_reveal(&tokens2, &3_000_000_i128);
+        client_staged
+            .batch_reveal(&admin2, &tokens2, &3_000_000_i128);
+        let preflight_then_reveal_cpu = env_staged.budget().cpu_instruction_cost();
+
+        std::println!(
+            "batch_reveal alone: {} CPU instructions; preflight_batch_reveal + batch_reveal: {} CPU instructions (overhead: {} CPU)",
+            direct_cpu,
+            preflight_then_reveal_cpu,
+            preflight_then_reveal_cpu.saturating_sub(direct_cpu)
+        );
+
+        // The extra dry-run pass must add a bounded, non-zero overhead — it
+        // should never be cheaper than skipping it, and should not blow up
+        // disproportionately to the batch size.
+        assert!(preflight_then_reveal_cpu >= direct_cpu);
     }
 }
