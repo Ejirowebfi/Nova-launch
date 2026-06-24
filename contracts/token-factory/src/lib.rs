@@ -2232,6 +2232,9 @@ mod accounting_property_test;
 #[cfg(all(test, feature = "legacy-tests"))]
 mod vault_cancellation_test;
 
+#[cfg(test)]
+mod vault_deposit_withdraw_test;
+
 // Vault/Stream Security and Fuzz Tests
 // Temporarily disabled - requires fixing timelock/freeze dependencies
 // #[cfg(test)]
