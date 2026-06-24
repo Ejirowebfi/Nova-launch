@@ -404,3 +404,23 @@ model IntegrationState {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+/// Frontend ErrorBoundary reports, enriched with whatever Stellar transaction
+/// context (txHash/ledger/wallet/route) was in flight when the render error
+/// was caught. Never stores private keys, seed phrases, or signed payloads.
+model ErrorReport {
+  id             String   @id @default(uuid())
+  message        String
+  stack          String?
+  componentStack String?
+  txHash         String?
+  ledgerSequence Int?
+  walletAddress  String?
+  route          String?
+  network        String?
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([txHash])
+  @@index([walletAddress])
+}
