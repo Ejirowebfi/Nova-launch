@@ -625,6 +625,12 @@ pub enum DataKey {
     OwnerVaultCount(Address),
     VaultByCreator(Address, u32),
     CreatorVaultCount(Address),
+    /// Cumulative withdrawal volume for the current epoch (keyed by epoch number)
+    EpochWithdrawVolume(u32),
+    /// Admin-configured per-epoch withdrawal limit
+    VaultWithdrawLimit,
+    /// Whether vault withdrawals are paused by the circuit breaker
+    VaultCircuitBreakerPaused,
     PendingAdmin,
     BuybackCampaign(u64),
     BuybackCampaignCount,
@@ -991,6 +997,8 @@ impl Error {
     pub const DistributionAlreadyClaimed: Self = Self(103);
     pub const DistributionAlreadyReclaimed: Self = Self(104);
     pub const DistributionZeroSupply: Self = Self(105);
+    // Per-epoch vault withdrawal circuit breaker (#1362)
+    pub const VaultCircuitBreakerActive: Self = Self(106);
 }
 
 impl From<Error> for soroban_sdk::Error {
