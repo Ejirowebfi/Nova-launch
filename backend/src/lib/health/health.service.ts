@@ -7,6 +7,7 @@ import {
   HealthCheckOptions,
 } from "./health.types";
 import { validateEnv } from "../../config/env";
+import { getCircuitBreakerRegistrySnapshot } from "../circuitBreaker";
 
 const _env = validateEnv();
 
@@ -105,10 +106,12 @@ export class HealthService {
 
     const basicHealth = await this.checkHealth(options);
     const metrics = await this.collectMetrics();
+    const circuitBreakers = getCircuitBreakerRegistrySnapshot();
 
     const result: DetailedHealthCheckResult = {
       ...basicHealth,
       metrics,
+      circuitBreakers,
     };
 
     this.cache.set<DetailedHealthCheckResult>(cacheKey, result);

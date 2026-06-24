@@ -135,3 +135,41 @@ export class CircuitBreaker {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Per-service registry
+//
+// Outbound service clients (Pinata, SendGrid, Twilio, Horizon, ...) register
+// their circuit breaker here so observability endpoints — e.g.
+// `/health/detailed` — can report per-service breaker state without each
+// caller needing its own wiring.
+// ---------------------------------------------------------------------------
+
+const registry = new Map<string, CircuitBreaker>();
+
+export interface CircuitBreakerHealthEntry {
+  state: CircuitBreakerState;
+  failureCount: number;
+  successCount: number;
+  lastFailureTime: number;
+  timeSinceLastFailure: number;
+}
+
+/** Register a circuit breaker under a service name for health reporting. */
+export function registerCircuitBreaker(serviceName: string, breaker: CircuitBreaker): void {
+  registry.set(serviceName, breaker);
+}
+
+/** Snapshot of every registered circuit breaker's current metrics, keyed by service name. */
+export function getCircuitBreakerRegistrySnapshot(): Record<string, CircuitBreakerHealthEntry> {
+  const snapshot: Record<string, CircuitBreakerHealthEntry> = {};
+  for (const [serviceName, breaker] of registry) {
+    snapshot[serviceName] = breaker.getMetrics();
+  }
+  return snapshot;
+}
+
+/** Test-only: clear the registry between test runs. */
+export function __resetCircuitBreakerRegistryForTests(): void {
+  registry.clear();
+}

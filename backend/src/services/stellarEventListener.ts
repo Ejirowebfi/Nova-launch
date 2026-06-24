@@ -16,6 +16,7 @@ import {
 } from "../stellar-service-integration/rate-limiter";
 import { ListenerBackoffState, LISTENER_RECONNECT_CONFIG } from "./listenerBackoff";
 import { IntegrationMetrics } from "../monitoring/metrics/prometheus-config";
+import { OutboundHttpClient } from "../lib/outboundHttpClient";
 import {
   PROJECTION_LAG_THRESHOLDS,
   determineThresholdStatus,
@@ -39,9 +40,16 @@ export interface HorizonTransport {
   getEvents(url: string, params: any): Promise<{ data: { _embedded?: { records: StellarEvent[] } } }>;
 }
 
+// Per-call retry (3 attempts, jittered backoff, skips 4xx) and circuit
+// breaker protection for the real Horizon HTTP transport. This is a
+// separate, faster-reacting layer underneath `pollEvents()`'s own
+// poll-loop-level backoff — it fails fast within a single poll iteration
+// instead of always waiting for the outer loop to back off.
+const horizonClient = new OutboundHttpClient({ serviceName: "horizon" });
+
 export class DefaultHorizonTransport implements HorizonTransport {
   async getEvents(url: string, params: any): Promise<any> {
-    return axios.get(url, { params, timeout: 30000 });
+    return horizonClient.execute(() => axios.get(url, { params, timeout: 30000 }));
   }
 }
 
