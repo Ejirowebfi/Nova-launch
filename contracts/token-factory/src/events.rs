@@ -948,6 +948,56 @@ pub fn emit_vault_cancelled(env: &Env, vault_id: u64, actor: &Address, remaining
     );
 }
 
+/// Emit a structured `OperationFailed` event for a rejected vault operation (#1384).
+///
+/// **Event Name**: vlt_fail
+///
+/// **Topics** (indexed):
+/// - Event name: "vlt_fail"
+/// - vault_id: u64 - The vault the failed operation targeted (`u64::MAX` if the
+///   vault id was not yet known, e.g. on `create_vault` failures before a vault
+///   is allocated).
+///
+/// **Payload** (non-indexed):
+/// - error_code: u32 - The numeric `Error` discriminant returned to the caller.
+///   This is the same code surfaced as the Wasm ABI contract error; Soroban's
+///   on-chain error return path only supports a flat `u32`, so this event is
+///   the mechanism by which richer diagnostic context travels off-chain.
+/// - error_name: Symbol - Stable string representation of the error variant
+///   (see `Error::name()`). Indexers should key off this name rather than the
+///   numeric code where possible, since the name is documented to remain
+///   stable for a given variant.
+/// - amount: i128 - The amount affected by the failed operation (e.g. the
+///   claim/fund/transfer amount). `0` when the operation has no associated
+///   amount (e.g. milestone verification).
+/// - condition: Symbol - Short machine-readable description of the specific
+///   failing condition (e.g. "cliff_not_met", "not_owner"), distinct from the
+///   error name so indexers can disambiguate the many call sites that share a
+///   generic error code (e.g. `InvalidParameters`) by operation semantics.
+///
+/// **Schema Stability**: This schema is immutable once deployed. Any change
+/// requires a new versioned event (e.g. `vlt_fail_v2`).
+///
+/// Emitted immediately before every vault entry point (`create_vault`,
+/// `claim_vault`, `cancel_vault`, `verify_milestone`,
+/// `propose_vault_owner_change`, `approve_vault_owner_change`) returns an
+/// error, so off-chain indexers such as `vaultEventParser.ts` can build
+/// rich, typed error messages without hardcoding numeric-to-meaning mappings.
+pub fn emit_operation_failed(
+    env: &Env,
+    vault_id: u64,
+    error: crate::types::Error,
+    amount: i128,
+    condition: &str,
+) {
+    let error_name = soroban_sdk::Symbol::new(env, error.name());
+    let condition_sym = soroban_sdk::Symbol::new(env, condition);
+    env.events().publish(
+        (symbol_short!("vlt_fail"), vault_id),
+        (error.0, error_name, amount, condition_sym),
+    );
+}
+
 /// Emit campaign created event
 ///
 /// **Event Name**: cmp_crt

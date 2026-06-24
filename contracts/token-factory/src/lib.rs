@@ -154,6 +154,10 @@ mod batch_atomicity_test;
 #[cfg(test)]
 mod vault_deposit_withdraw_test;
 
+/// Tests for structured vault error codes / diagnostic context (#1384).
+#[cfg(test)]
+mod vault_error_test;
+
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use types::{
     AuctionStatus, BurnAuction, BuybackCampaign, CampaignStatus, ContractMetadata,
@@ -2695,11 +2699,16 @@ impl TokenFactory {
     ) -> Result<u64, Error> {
         creator.require_auth();
 
+        // No vault id is allocated yet for pre-creation validation failures.
+        const NO_VAULT_ID: u64 = u64::MAX;
+
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, NO_VAULT_ID, Error::ContractPaused, amount, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
         if amount <= 0 {
+            events::emit_operation_failed(&env, NO_VAULT_ID, Error::InvalidAmount, amount, "amount_not_positive");
             return Err(Error::InvalidAmount);
         }
 
@@ -2708,19 +2717,28 @@ impl TokenFactory {
         let has_milestone_unlock = milestone_hash != zero_hash;
 
         if !has_time_unlock && !has_milestone_unlock {
+            events::emit_operation_failed(&env, NO_VAULT_ID, Error::InvalidParameters, amount, "missing_unlock_condition");
             return Err(Error::InvalidParameters);
         }
 
         // A verifier is required when a milestone hash is set (#1133)
         if has_milestone_unlock && verifier.is_none() {
+            events::emit_operation_failed(&env, NO_VAULT_ID, Error::InvalidParameters, amount, "milestone_without_verifier");
             return Err(Error::InvalidParameters);
         }
 
         if storage::get_token_info_by_address(&env, &token).is_none() {
+            events::emit_operation_failed(&env, NO_VAULT_ID, Error::TokenNotFound, amount, "token_not_registered");
             return Err(Error::TokenNotFound);
         }
 
-        let vault_id = storage::increment_vault_count(&env)?;
+        let vault_id = match storage::increment_vault_count(&env) {
+            Ok(id) => id,
+            Err(e) => {
+                events::emit_operation_failed(&env, NO_VAULT_ID, e, amount, "vault_count_overflow");
+                return Err(e);
+            }
+        };
         let vault = Vault {
             id: vault_id,
             token: token.clone(),
@@ -2736,7 +2754,10 @@ impl TokenFactory {
             milestone_verified: false,
         };
 
-        storage::set_vault(&env, &vault)?;
+        if let Err(e) = storage::set_vault(&env, &vault) {
+            events::emit_operation_failed(&env, vault_id, e, amount, "vault_persist_failed");
+            return Err(e);
+        }
 
         events::emit_vault_created(
             &env,
@@ -2788,12 +2809,16 @@ impl TokenFactory {
         owner.require_auth();
 
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, vault_id, Error::ContractPaused, 0, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
         // Flash loan / reentrancy protection — must be acquired before any state reads
         // that could be manipulated by a reentrant call.
-        storage::acquire_reentrancy_lock(&env)?;
+        if let Err(e) = storage::acquire_reentrancy_lock(&env) {
+            events::emit_operation_failed(&env, vault_id, e, 0, "reentrancy_lock_held");
+            return Err(e);
+        }
 
         let result = Self::claim_vault_inner(&env, &owner, vault_id, proof);
         storage::release_reentrancy_lock(&env);
@@ -2807,21 +2832,30 @@ impl TokenFactory {
         vault_id: u64,
         proof: Option<Bytes>,
     ) -> Result<i128, Error> {
-        let mut vault = storage::get_vault(env, vault_id).ok_or(Error::TokenNotFound)?;
+        let mut vault = match storage::get_vault(env, vault_id) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(env, vault_id, Error::TokenNotFound, 0, "vault_not_found");
+                return Err(Error::TokenNotFound);
+            }
+        };
 
         if vault.owner != *owner {
+            events::emit_operation_failed(env, vault_id, Error::Unauthorized, vault.total_amount, "not_vault_owner");
             return Err(Error::Unauthorized);
         }
 
         if vault.status != VaultStatus::Active {
+            events::emit_operation_failed(env, vault_id, Error::InvalidParameters, vault.total_amount, "vault_not_active");
             return Err(Error::InvalidParameters);
         }
 
         // Milestone verification (#1133): if a milestone hash is set, the
         // authorized verifier must have already called `verify_milestone`.
-        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let zero_hash = BytesN::from_array(env, &[0u8; 32]);
         if vault.milestone_hash != zero_hash {
             if !vault.milestone_verified {
+                events::emit_operation_failed(env, vault_id, Error::MilestoneUnauthorized, vault.total_amount, "milestone_not_verified");
                 return Err(Error::MilestoneUnauthorized);
             }
         }
@@ -2829,27 +2863,35 @@ impl TokenFactory {
         // Time-based unlock check
         let current_time = env.ledger().timestamp();
         if vault.unlock_time > 0 && current_time < vault.unlock_time {
+            events::emit_operation_failed(env, vault_id, Error::InvalidParameters, vault.total_amount, "cliff_not_reached");
             return Err(Error::InvalidParameters);
         }
 
-        let claimable = vault
-            .total_amount
-            .checked_sub(vault.claimed_amount)
-            .ok_or(Error::ArithmeticError)?;
+        let claimable = match vault.total_amount.checked_sub(vault.claimed_amount) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(env, vault_id, Error::ArithmeticError, vault.total_amount, "claimable_underflow");
+                return Err(Error::ArithmeticError);
+            }
+        };
         if claimable <= 0 {
+            events::emit_operation_failed(env, vault_id, Error::NothingToClaim, claimable, "nothing_to_claim");
             return Err(Error::NothingToClaim);
         }
 
         // State update before external call (CEI pattern)
         vault.claimed_amount = vault.total_amount;
         vault.status = VaultStatus::Claimed;
-        storage::set_vault(&env, &vault)?;
+        if let Err(e) = storage::set_vault(env, &vault) {
+            events::emit_operation_failed(env, vault_id, e, claimable, "vault_persist_failed");
+            return Err(e);
+        }
 
         // External call after state is committed
-        let token_client = soroban_sdk::token::Client::new(&env, &vault.token);
+        let token_client = soroban_sdk::token::Client::new(env, &vault.token);
         token_client.transfer(&env.current_contract_address(), &*owner, &claimable);
 
-        events::emit_vault_claimed(&env, vault_id, owner, claimable);
+        events::emit_vault_claimed(env, vault_id, owner, claimable);
 
         Ok(claimable)
     }
@@ -2869,27 +2911,41 @@ impl TokenFactory {
         actor.require_auth();
 
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, vault_id, Error::ContractPaused, 0, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
-        let mut vault = storage::get_vault(&env, vault_id).ok_or(Error::TokenNotFound)?;
+        let mut vault = match storage::get_vault(&env, vault_id) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::TokenNotFound, 0, "vault_not_found");
+                return Err(Error::TokenNotFound);
+            }
+        };
         let admin = storage::get_admin(&env);
         if actor != vault.creator && actor != admin {
+            events::emit_operation_failed(&env, vault_id, Error::Unauthorized, vault.total_amount, "not_creator_or_admin");
             return Err(Error::Unauthorized);
         }
 
         if vault.status != VaultStatus::Active {
+            events::emit_operation_failed(&env, vault_id, Error::InvalidParameters, vault.total_amount, "vault_not_active");
             return Err(Error::InvalidParameters);
         }
 
-        let remaining_amount = vault
-            .total_amount
-            .checked_sub(vault.claimed_amount)
-            .ok_or(Error::ArithmeticError)?
-            .max(0);
+        let remaining_amount = match vault.total_amount.checked_sub(vault.claimed_amount) {
+            Some(v) => v.max(0),
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::ArithmeticError, vault.total_amount, "remaining_amount_underflow");
+                return Err(Error::ArithmeticError);
+            }
+        };
 
         vault.status = VaultStatus::Cancelled;
-        storage::set_vault(&env, &vault)?;
+        if let Err(e) = storage::set_vault(&env, &vault) {
+            events::emit_operation_failed(&env, vault_id, e, remaining_amount, "vault_persist_failed");
+            return Err(e);
+        }
         events::emit_vault_cancelled(&env, vault_id, &actor, remaining_amount);
 
         Ok(())
@@ -2909,27 +2965,42 @@ impl TokenFactory {
         verifier.require_auth();
 
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, vault_id, Error::ContractPaused, 0, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
-        let mut vault = storage::get_vault(&env, vault_id).ok_or(Error::TokenNotFound)?;
+        let mut vault = match storage::get_vault(&env, vault_id) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::TokenNotFound, 0, "vault_not_found");
+                return Err(Error::TokenNotFound);
+            }
+        };
 
         if vault.status != VaultStatus::Active {
+            events::emit_operation_failed(&env, vault_id, Error::InvalidParameters, vault.total_amount, "vault_not_active");
             return Err(Error::InvalidParameters);
         }
 
         // Only the designated verifier may approve
         match &vault.verifier {
             Some(v) if *v == verifier => {}
-            _ => return Err(Error::MilestoneUnauthorized),
+            _ => {
+                events::emit_operation_failed(&env, vault_id, Error::MilestoneUnauthorized, vault.total_amount, "not_designated_verifier");
+                return Err(Error::MilestoneUnauthorized);
+            }
         }
 
         if vault.milestone_verified {
+            events::emit_operation_failed(&env, vault_id, Error::MilestoneAlreadyVerified, vault.total_amount, "milestone_already_verified");
             return Err(Error::MilestoneAlreadyVerified);
         }
 
         vault.milestone_verified = true;
-        storage::set_vault(&env, &vault)?;
+        if let Err(e) = storage::set_vault(&env, &vault) {
+            events::emit_operation_failed(&env, vault_id, e, vault.total_amount, "vault_persist_failed");
+            return Err(e);
+        }
 
         events::emit_milestone_verified(&env, vault_id, &verifier);
         Ok(())
@@ -2954,20 +3025,30 @@ impl TokenFactory {
         proposer.require_auth();
 
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, vault_id, Error::ContractPaused, 0, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
-        let vault = storage::get_vault(&env, vault_id).ok_or(Error::TokenNotFound)?;
+        let vault = match storage::get_vault(&env, vault_id) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::TokenNotFound, 0, "vault_not_found");
+                return Err(Error::TokenNotFound);
+            }
+        };
 
         if vault.status != VaultStatus::Active {
+            events::emit_operation_failed(&env, vault_id, Error::InvalidParameters, vault.total_amount, "vault_not_active");
             return Err(Error::InvalidParameters);
         }
 
         if proposer != vault.owner && proposer != vault.creator {
+            events::emit_operation_failed(&env, vault_id, Error::Unauthorized, vault.total_amount, "not_owner_or_creator");
             return Err(Error::Unauthorized);
         }
 
         if storage::get_pending_vault_owner_change(&env, vault_id).is_some() {
+            events::emit_operation_failed(&env, vault_id, Error::VaultOwnerChangePending, vault.total_amount, "owner_change_already_pending");
             return Err(Error::VaultOwnerChangePending);
         }
 
@@ -3005,29 +3086,45 @@ impl TokenFactory {
         approver.require_auth();
 
         if storage::is_paused(&env) {
+            events::emit_operation_failed(&env, vault_id, Error::ContractPaused, 0, "contract_paused");
             return Err(Error::ContractPaused);
         }
 
-        let mut vault = storage::get_vault(&env, vault_id).ok_or(Error::TokenNotFound)?;
+        let mut vault = match storage::get_vault(&env, vault_id) {
+            Some(v) => v,
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::TokenNotFound, 0, "vault_not_found");
+                return Err(Error::TokenNotFound);
+            }
+        };
 
         if vault.status != VaultStatus::Active {
+            events::emit_operation_failed(&env, vault_id, Error::InvalidParameters, vault.total_amount, "vault_not_active");
             return Err(Error::InvalidParameters);
         }
 
-        let mut change = storage::get_pending_vault_owner_change(&env, vault_id)
-            .ok_or(Error::VaultOwnerChangeNotFound)?;
+        let mut change = match storage::get_pending_vault_owner_change(&env, vault_id) {
+            Some(c) => c,
+            None => {
+                events::emit_operation_failed(&env, vault_id, Error::VaultOwnerChangeNotFound, vault.total_amount, "no_pending_owner_change");
+                return Err(Error::VaultOwnerChangeNotFound);
+            }
+        };
 
         let is_owner = approver == vault.owner;
         let is_creator = approver == vault.creator;
 
         if !is_owner && !is_creator {
+            events::emit_operation_failed(&env, vault_id, Error::Unauthorized, vault.total_amount, "not_owner_or_creator");
             return Err(Error::Unauthorized);
         }
 
         if is_owner && change.owner_approved {
+            events::emit_operation_failed(&env, vault_id, Error::VaultOwnerChangeAlreadyApproved, vault.total_amount, "owner_already_approved");
             return Err(Error::VaultOwnerChangeAlreadyApproved);
         }
         if is_creator && change.creator_approved {
+            events::emit_operation_failed(&env, vault_id, Error::VaultOwnerChangeAlreadyApproved, vault.total_amount, "creator_already_approved");
             return Err(Error::VaultOwnerChangeAlreadyApproved);
         }
 
@@ -3044,7 +3141,10 @@ impl TokenFactory {
             // Both parties approved — execute the change
             let old_owner = vault.owner.clone();
             vault.owner = change.new_owner.clone();
-            storage::set_vault(&env, &vault)?;
+            if let Err(e) = storage::set_vault(&env, &vault) {
+                events::emit_operation_failed(&env, vault_id, e, vault.total_amount, "vault_persist_failed");
+                return Err(e);
+            }
             storage::remove_pending_vault_owner_change(&env, vault_id);
             events::emit_vault_owner_changed(&env, vault_id, &old_owner, &change.new_owner);
         } else {
