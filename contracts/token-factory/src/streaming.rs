@@ -1,7 +1,7 @@
 use crate::events;
 use crate::storage;
 use crate::types::{Error, StreamInfo, StreamParams};
-use soroban_sdk::{testutils::Ledger, Address, Env, Vec};
+use soroban_sdk::{Address, Env, Vec};
 
 /// Maximum number of streams in a batch operation
 const MAX_BATCH_SIZE: u32 = 100;
@@ -122,6 +122,7 @@ mod deterministic_batch_event_tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         let stream2 = StreamInfo { id: 2, ..stream1.clone() };
 
@@ -161,6 +162,7 @@ mod deterministic_batch_event_tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         let stream2 = StreamInfo {
             id: 12,
@@ -260,6 +262,7 @@ pub fn batch_create_streams(
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
 
         storage::set_stream(env, stream_id, &stream);
@@ -773,6 +776,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
         // Set time just before cliff
@@ -797,6 +801,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
         // Set time at cliff
@@ -874,6 +879,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
 
         // Set time before cliff
@@ -902,6 +908,7 @@ mod tests {
             cancelled: false,
             paused: false,
             metadata: None,
+            disputed: false,
         };
 
         // Set time after cliff (halfway through vesting)
@@ -930,6 +937,7 @@ mod tests {
             cancelled: false,
             paused: false,
             metadata: None,
+            disputed: false,
         };
 
         // Set time after end
@@ -958,6 +966,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
 
         // Mock save stream to storage
@@ -1009,6 +1018,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1040,6 +1050,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1069,6 +1080,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1115,6 +1127,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1161,6 +1174,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1197,6 +1211,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1245,6 +1260,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1290,6 +1306,7 @@ mod tests {
             metadata: None,
             cancelled: true, // Stream is cancelled
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1320,6 +1337,7 @@ mod tests {
             metadata: None,
             cancelled: true, // Stream is cancelled
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1369,6 +1387,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1421,6 +1440,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1450,6 +1470,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 
@@ -1490,6 +1511,7 @@ mod tests {
             metadata: None,
             cancelled: false,
             paused: false,
+            disputed: false,
         };
         set_stream(&env, &contract_id, 0, &stream);
 

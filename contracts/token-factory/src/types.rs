@@ -689,6 +689,43 @@ pub enum DataKey {
     DistributionClaimed(u32, Address),
     /// Running total of amounts claimed for a distribution
     DistributionClaimedTotal(u32),
+    // ── Transfer restrictions (address freezing) ────────────────────────────
+    /// Whether an address is frozen for a given token: (token_address, address)
+    FrozenAddress(Address, Address),
+    // ── Token fractionalization ──────────────────────────────────────────────
+    /// Fractional vault by ID
+    FractionalVault(u64),
+    /// Total number of fractional vaults created
+    FractionalVaultCount,
+    /// Number of fractional vaults owned by an address
+    OwnerFractionalVaultCount(Address),
+    /// Fractional vault ID for an owner at a given index: (owner, index)
+    FractionalVaultByOwner(Address, u32),
+    /// Vault ID associated with an underlying asset
+    AssetToVault(BytesN<32>),
+    // ── Role-based access control ────────────────────────────────────────────
+    /// Whether an address holds a role on a token: (token_index, address, role_discriminant)
+    TokenRole(u32, Address, u32),
+    // ── Metadata history ─────────────────────────────────────────────────────
+    /// Number of metadata history records for a token
+    MetadataHistoryCount(u32),
+    // ── Multi-signature admin operations ─────────────────────────────────────
+    /// Multi-sig configuration (signers + threshold)
+    MultiSigConfig,
+    /// Total number of multi-sig proposals created
+    MultiSigProposalCount,
+    /// Multi-sig proposal by ID
+    MultiSigProposal(u64),
+    /// Whether a signer has approved a multi-sig proposal: (proposal_id, approver)
+    MultiSigApproval(u64, Address),
+    // ── Time-locked burn schedules ────────────────────────────────────────────
+    /// Total number of burn schedules created
+    BurnScheduleCount,
+    /// Burn schedule by ID
+    BurnSchedule(u64),
+    // ── Cross-contract trusted callers ───────────────────────────────────────
+    /// Whether an address is a registered trusted caller
+    TrustedCaller(Address),
 }
 
 /// A point-in-time record of a token holder's balance.
@@ -991,6 +1028,8 @@ impl Error {
     pub const DistributionAlreadyClaimed: Self = Self(103);
     pub const DistributionAlreadyReclaimed: Self = Self(104);
     pub const DistributionZeroSupply: Self = Self(105);
+    // Multi-sig configuration errors
+    pub const DuplicateSigners: Self = Self(106);
 }
 
 impl From<Error> for soroban_sdk::Error {
