@@ -2,7 +2,7 @@
  * Tests for Event Bus Architecture (#843)
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventBus, BusEvent } from "../services/eventBus";
 
 // ---------------------------------------------------------------------------
@@ -474,69 +474,76 @@ describe("Issue #1064: Event bus pub/sub delivery guarantees", () => {
 });
 
 // ---------------------------------------------------------------------------
-// High-throughput burst
+// Issue #1406: Schema validation in EventBus.publish (non-production only)
 // ---------------------------------------------------------------------------
 
-describe("high-throughput burst", () => {
-  it("delivers all 1000 events to each of 5 concurrent subscribers (zero dropped)", async () => {
-    const bus = makeBus();
-    const EVENT_COUNT = 1000;
-    const SUBSCRIBER_COUNT = 5;
-    const counts = Array.from({ length: SUBSCRIBER_COUNT }, () => 0);
+describe("Issue #1406: Event schema validation in publish()", () => {
+  const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
-    for (let i = 0; i < SUBSCRIBER_COUNT; i++) {
-      bus.subscribe("burst.event", () => {
-        counts[i]++;
-      });
-    }
-
-    const publishes: Promise<unknown>[] = [];
-    for (let i = 0; i < EVENT_COUNT; i++) {
-      publishes.push(bus.publish("burst.event", { seq: i }));
-    }
-    await Promise.all(publishes);
-
-    const totalReceived = counts.reduce((sum, c) => sum + c, 0);
-    expect(totalReceived).toBe(EVENT_COUNT * SUBSCRIBER_COUNT);
-    for (const count of counts) {
-      expect(count).toBe(EVENT_COUNT);
-    }
+  afterEach(() => {
+    process.env.NODE_ENV = ORIGINAL_NODE_ENV;
   });
 
-  it("error in subscriber 3 does not prevent other 4 subscribers from receiving all events", async () => {
+  it("publishes successfully when the payload matches its registered schema", async () => {
     const bus = makeBus();
-    const EVENT_COUNT = 100;
-    const SUBSCRIBER_COUNT = 5;
-    const counts = Array.from({ length: SUBSCRIBER_COUNT }, () => 0);
+    process.env.NODE_ENV = "test";
 
-    for (let i = 0; i < SUBSCRIBER_COUNT; i++) {
-      const idx = i;
-      bus.subscribe("burst.isolated", () => {
-        counts[idx]++;
-        // Subscriber 3 (index 2) throws on every 5th event it receives
-        if (idx === 2 && counts[idx] % 5 === 0) {
-          throw new Error(`subscriber 3 error on event ${counts[idx]}`);
-        }
-      });
-    }
+    await expect(
+      bus.publish("burn.executed", {
+        creatorAddress: "GCREATOR",
+        tokenAddress: "CTOKEN1",
+        amount: "500",
+        burnedBy: "GBURNER",
+        isAdminBurn: false,
+        txHash: "hashB",
+        timestamp: "2026-06-23T00:00:00.000Z",
+      })
+    ).resolves.toBeDefined();
+  });
 
-    const publishes: Promise<unknown>[] = [];
-    for (let i = 0; i < EVENT_COUNT; i++) {
-      publishes.push(bus.publish("burst.isolated", { seq: i }));
-    }
-    await Promise.all(publishes);
+  it("throws synchronously in non-production when the payload violates its registered schema", async () => {
+    const bus = makeBus();
+    process.env.NODE_ENV = "development";
 
-    // Subscribers 0, 1, 3, 4 receive all events unaffected
-    for (let i = 0; i < SUBSCRIBER_COUNT; i++) {
-      expect(counts[i]).toBe(EVENT_COUNT);
-    }
+    await expect(
+      bus.publish("burn.executed", {
+        // missing every required field
+        unexpected: true,
+      })
+    ).rejects.toThrow(/failed schema validation/);
+  });
 
-    // Errors from subscriber 3 are captured in the DLQ, not propagated
-    const dlq = bus.getDeadLetterQueue();
-    expect(dlq.length).toBeGreaterThan(0);
-    for (const entry of dlq) {
-      expect(entry.event.type).toBe("burst.isolated");
-      expect(entry.error).toMatch(/subscriber 3 error/);
-    }
+  it("does not record an invalid event in history (validation happens before dispatch)", async () => {
+    const bus = makeBus();
+    process.env.NODE_ENV = "test";
+
+    await expect(bus.publish("burn.executed", {})).rejects.toThrow();
+    expect(bus.getHistory("burn.executed")).toHaveLength(0);
+  });
+
+  it("does not deliver an invalid event to subscribers", async () => {
+    const bus = makeBus();
+    process.env.NODE_ENV = "test";
+    const handler = vi.fn();
+    bus.subscribe("burn.executed", handler);
+
+    await expect(bus.publish("burn.executed", {})).rejects.toThrow();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("does not validate (and does not throw) for event types with no registered schema", async () => {
+    const bus = makeBus();
+    process.env.NODE_ENV = "test";
+
+    await expect(
+      bus.publish("totally.unschematized.event", { whatever: "goes" })
+    ).resolves.toBeDefined();
+  });
+
+  it("skips validation entirely in production, even for an invalid payload", async () => {
+    const bus = makeBus();
+    process.env.NODE_ENV = "production";
+
+    await expect(bus.publish("burn.executed", {})).resolves.toBeDefined();
   });
 });

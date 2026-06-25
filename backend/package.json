@@ -26,8 +26,8 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,js,jsx,json}\"",
     "type-check": "tsc --noEmit",
     "docs:generate": "tsx scripts/generate-openapi.ts && tsx scripts/generate-docs.ts",
-    "incident:test": "vitest run --config ../monitoring/pagerduty/vitest.config.ts ../monitoring/pagerduty/incident-response.test.ts",
-    "test:update-snapshots": "vitest run src/__tests__/governanceEventParser.snapshot.test.ts --update-snapshots"
+    "generate:event-types": "tsx scripts/generate-event-types.ts",
+    "incident:test": "vitest run --config ../monitoring/pagerduty/vitest.config.ts ../monitoring/pagerduty/incident-response.test.ts"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^8.5.0",
@@ -37,6 +37,7 @@
     "@opentelemetry/sdk-node": "^0.219.0",
     "@prisma/adapter-pg": "^7.5.0",
     "@prisma/client": "^5.22.0",
+    "ajv": "^8.17.1",
     "axios": "^1.13.5",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

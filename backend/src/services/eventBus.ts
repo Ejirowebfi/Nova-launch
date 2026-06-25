@@ -9,11 +9,20 @@
  *  - Unsubscribe support
  *  - Dead-letter queue for failed handler invocations
  *  - Event history for replay / debugging
+ *  - Schema validation against event-schemas/ in non-production (#1406)
  *
- * Issue: #843
+ * Issue: #843, #1406
  */
 
 import { v4 as uuidv4 } from "uuid";
+import { validateEventPayload } from "./eventSchemaValidator";
+import { logger } from "../lib/logger";
+
+/**
+ * Whether the current process is running in production. Mirrors the
+ * `isProduction()` convention used elsewhere (e.g. `backend/src/routes/health.ts`).
+ */
+const isProduction = () => process.env.NODE_ENV === "production";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -128,13 +137,32 @@ export class EventBus {
    * Handlers are invoked concurrently. A failing handler is caught and
    * recorded in the dead-letter queue — it does not affect other handlers.
    *
+   * Schema validation (#1406): in non-production environments
+   * (`NODE_ENV !== "production"`), `payload` is validated against the JSON
+   * Schema registered for `type` in `event-schemas/` *before* the event is
+   * recorded or dispatched. A mismatch throws `EventSchemaValidationError`
+   * synchronously so schema drift is caught immediately in dev/CI/tests
+   * rather than silently corrupting consumers. Event types with no
+   * registered schema are not validated. In production, validation is
+   * skipped entirely (logged at debug level) so a schema bug can never take
+   * down a live publish path — production payload drift is instead expected
+   * to be caught by the CI codegen-sync check and by non-prod testing.
+   *
    * @returns The fully constructed `BusEvent` that was dispatched.
+   * @throws {EventSchemaValidationError} if `payload` fails schema validation
+   *   outside production.
    */
   async publish<T = unknown>(
     type: string,
     payload: T,
     options: { correlationId?: string } = {}
   ): Promise<BusEvent<T>> {
+    if (!isProduction()) {
+      validateEventPayload(type, payload);
+    } else {
+      logger.debug("[EventBus] schema validation skipped in production", { type });
+    }
+
     const event: BusEvent<T> = {
       id: uuidv4(),
       type,
