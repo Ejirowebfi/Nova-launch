@@ -1495,32 +1495,132 @@ pub fn emit_dividend_reclaimed(
     );
 }
 
-/// Emit clawback event (v1)
+// ═══════════════════════════════════════════════════════════════════════
+// Recurring Stream Events
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Emit recurring stream created event
 ///
-/// **Schema Version**: 1
-/// **Event Name**: clwbk_v1
+/// **Event Name**: rec_str_cr
 ///
 /// **Topics** (indexed):
-/// - Event name: "clwbk_v1"
-/// - token_address: Address - The token contract address
+/// - Event name: "rec_str_cr"
+/// - recurring_stream_id: u64 - The recurring stream identifier
 ///
 /// **Payload** (non-indexed):
-/// - admin: Address  - The admin who performed the clawback
-/// - from: Address   - The holder whose tokens were reclaimed
-/// - amount: i128    - The number of tokens clawed back
-/// - timestamp: u64  - Ledger timestamp of the operation
+/// - creator: Address - The creator of the recurring stream
+/// - recipient: Address - Payment recipient for each period
+/// - amount_per_period: i128 - Amount per period
+/// - period_ledgers: u64 - Duration of each period in ledgers
+/// - total_periods: u32 - Total periods (0 = unlimited if auto_renew)
 ///
-/// **Schema Stability**: This schema is immutable. Any changes require a new version.
-pub fn emit_clawback(
+/// Emitted when a new recurring payment stream is created
+pub fn emit_recurring_stream_created(
     env: &Env,
-    token_address: &Address,
-    admin: &Address,
-    from: &Address,
-    amount: i128,
-    timestamp: u64,
+    recurring_stream_id: u64,
+    creator: &Address,
+    recipient: &Address,
+    amount_per_period: i128,
+    period_ledgers: u64,
+    total_periods: u32,
 ) {
     env.events().publish(
-        (symbol_short!("clwbk_v1"), token_address.clone()),
-        (admin.clone(), from.clone(), amount, timestamp),
+        (symbol_short!("rec_str_cr"), recurring_stream_id),
+        (
+            creator,
+            recipient,
+            amount_per_period,
+            period_ledgers,
+            total_periods,
+        ),
+    );
+}
+
+/// Emit recurring stream cancelled event
+///
+/// **Event Name**: rec_str_cn
+///
+/// **Topics** (indexed):
+/// - Event name: "rec_str_cn"
+/// - recurring_stream_id: u64 - The recurring stream identifier
+///
+/// **Payload** (non-indexed):
+/// - cancelled_by: Address - Address that cancelled the stream
+///
+/// Emitted when a recurring stream is cancelled
+pub fn emit_recurring_stream_cancelled(env: &Env, recurring_stream_id: u64, cancelled_by: &Address) {
+    env.events().publish(
+        (symbol_short!("rec_str_cn"), recurring_stream_id),
+        (cancelled_by,),
+    );
+}
+
+/// Emit auto-renewal disabled event
+///
+/// **Event Name**: rec_arn_dis
+///
+/// **Topics** (indexed):
+/// - Event name: "rec_arn_dis"
+/// - recurring_stream_id: u64 - The recurring stream identifier
+///
+/// Emitted when auto-renewal is disabled for a recurring stream
+pub fn emit_auto_renewal_disabled(env: &Env, recurring_stream_id: u64) {
+    env.events().publish(
+        (symbol_short!("rec_arn_dis"), recurring_stream_id),
+        (),
+    );
+}
+
+/// Emit recurring stream period created event
+///
+/// **Event Name**: rec_per_cr
+///
+/// **Topics** (indexed):
+/// - Event name: "rec_per_cr"
+/// - recurring_stream_id: u64 - The parent recurring stream identifier
+///
+/// **Payload** (non-indexed):
+/// - period_index: u32 - Which period this is (0-indexed)
+/// - child_stream_id: u64 - ID of the created child stream
+///
+/// Emitted when a new period is created for a recurring stream
+pub fn emit_recurring_stream_period_created(
+    env: &Env,
+    recurring_stream_id: u64,
+    period_index: u32,
+    child_stream_id: u64,
+) {
+    env.events().publish(
+        (symbol_short!("rec_per_cr"), recurring_stream_id),
+        (period_index, child_stream_id),
+    );
+}
+
+/// Emit recurring stream child created event (internal tracking)
+///
+/// **Event Name**: rec_ch_cr
+///
+/// **Topics** (indexed):
+/// - Event name: "rec_ch_cr"
+/// - recurring_stream_id: u64 - The parent recurring stream identifier
+///
+/// **Payload** (non-indexed):
+/// - period_index: u32 - Period number
+/// - child_vault_id: u64 - The child vault ID
+/// - recipient: Address - The recipient
+/// - amount: i128 - Amount for this period
+///
+/// Emitted when a child stream/vault is created for a recurring stream period
+pub fn emit_recurring_stream_child_created(
+    env: &Env,
+    recurring_stream_id: u64,
+    period_index: u32,
+    child_vault_id: u64,
+    recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("rec_ch_cr"), recurring_stream_id),
+        (period_index, child_vault_id, recipient, amount),
     );
 }
