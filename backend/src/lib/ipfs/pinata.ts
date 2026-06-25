@@ -10,6 +10,7 @@ import {
   CIDMismatchError,
 } from "./cidVerification.js";
 import { pinataQueue, type PinataQueueMetrics } from "./pinataQueue.js";
+import { gatewayRouter } from "./gatewayRouter.js";
 
 const cache = new NodeCache({ stdTTL: 3600 }); // 1 hour cache
 
@@ -223,53 +224,12 @@ export async function getMetadataFromIPFS(cid: string): Promise<any> {
   const cached = cache.get(cid);
   if (cached) return cached;
 
-  // Reject immediately while a re-pin is in progress for this CID
-  if (rePinInProgress.has(cid)) {
-    throw new CIDMismatchError(
-      cid,
-      "Re-pin in progress — content unavailable until integrity is restored"
-    );
-  }
-
-  // Fetch from IPFS with circuit breaker + queue throttle
-  return ipfsCircuitBreaker.execute(() =>
-    pinataQueue.enqueue(async () => {
-      const response = await fetch(
-        `${CID_VERIFY_GATEWAY}/${cid}`
-      );
-      if (!response.ok) throw new Error("Metadata not found");
-
-      const rawBuffer = Buffer.from(await response.arrayBuffer());
-
-      if (CID_VERIFY_RETRIEVAL_ENABLED) {
-        await verifyRetrievedContent(rawBuffer, cid, {
-          gatewayBaseUrl: CID_VERIFY_GATEWAY,
-          onMismatch: (cidVal, trustedHash, retrievedHash) => {
-            metadataCidMismatchCounter.inc({ cid: cidVal });
-            console.error(
-              `[pinata] metadata.cid_mismatch: cid=${cidVal} ` +
-                `trusted=${trustedHash} retrieved=${retrievedHash}`
-            );
-            rePinInProgress.add(cidVal);
-          },
-          rePinFromGateway: async (cidVal) => {
-            try {
-              await rePinFromGateway(cidVal);
-              // Evict in-memory cache so next request fetches fresh content
-              cache.del(cidVal);
-            } finally {
-              rePinInProgress.delete(cidVal);
-            }
-          },
-        });
-      }
-
-      const metadata = JSON.parse(rawBuffer.toString("utf8"));
-      cache.set(cid, metadata);
-
-      return metadata;
-    })
-  );
+  // Fetch via gateway router (primary → secondary → tertiary with failover)
+  return ipfsCircuitBreaker.execute(async () => {
+    const metadata = await gatewayRouter.fetch(cid);
+    cache.set(cid, metadata);
+    return metadata;
+  });
 }
 
 // ---------------------------------------------------------------------------
