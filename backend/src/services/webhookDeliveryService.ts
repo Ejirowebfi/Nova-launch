@@ -1,6 +1,7 @@
 import axios, { AxiosError } from "axios";
 import { gzip } from "zlib";
 import { promisify } from "util";
+import Redis from "ioredis";
 import {
   WebhookSubscription,
   WebhookPayload,
@@ -10,11 +11,16 @@ import {
 import webhookService from "./webhookService";
 import webhookDeadLetterService from "./webhookDeadLetterService";
 import { IntegrationMetrics } from "../monitoring/metrics/prometheus-config";
-import { webhookDeliveryLatency } from "../lib/metrics";
+import {
+  webhookDeliveryLatency,
+  MetricsCollector,
+} from "../lib/metrics";
 import { CircuitBreaker } from "../lib/circuitBreaker";
-import tenantWebhookRateLimiter, {
-  TenantWebhookRateLimiter,
-} from "./tenantWebhookRateLimiter";
+import { WorkerPool } from "../lib/WorkerPool";
+import {
+  createRedisClient,
+  incrementSlidingWindow,
+} from "../middleware/rateLimiter";
 
 const gzipAsync = promisify(gzip);
 
@@ -22,14 +28,36 @@ const TIMEOUT_MS = parseInt(process.env.WEBHOOK_TIMEOUT_MS || "5000");
 const MAX_RETRIES = parseInt(process.env.WEBHOOK_MAX_RETRIES || "3");
 const RETRY_DELAY_MS = parseInt(process.env.WEBHOOK_RETRY_DELAY_MS || "1000");
 
+// Bounded concurrency for the delivery worker pool. Workers fan out up to
+// this many deliveries at once; everything beyond that waits in the pool's
+// internal queue, which is what provides back-pressure under high
+// subscription counts instead of unbounded `Promise.allSettled` fan-out.
+const WORKER_CONCURRENCY = parseInt(process.env.WEBHOOK_WORKER_CONCURRENCY || "10");
+
+// Per-tenant delivery rate limit, enforced inside each pool worker (not as
+// HTTP middleware, since this code path is not a request handler).
+const TENANT_RATE_LIMIT_WINDOW_MS = parseInt(
+  process.env.WEBHOOK_TENANT_RATE_LIMIT_WINDOW_MS || "60000"
+);
+const TENANT_RATE_LIMIT_MAX = parseInt(
+  process.env.WEBHOOK_TENANT_RATE_LIMIT_MAX || "60"
+);
+
+interface DeliveryTask {
+  subscription: WebhookSubscription;
+  event: WebhookEventType;
+  data: WebhookEventData;
+  correlationId: string;
+}
+
 export class WebhookDeliveryService {
   private circuitBreaker: CircuitBreaker;
   // Read at construction time so tests can override via process.env before new WebhookDeliveryService()
   private readonly compressionThresholdBytes: number;
-  // Per-tenant token-bucket rate limiter gating outbound delivery. Defaults
-  // to the shared singleton so all callers in the process share state, but
-  // can be overridden (e.g. in tests) via the constructor.
-  private readonly rateLimiter: TenantWebhookRateLimiter;
+  private readonly pool: WorkerPool<DeliveryTask>;
+  // Lazily created so environments/tests without Redis never pay the
+  // connection cost unless a delivery actually needs rate-limit checking.
+  private rateLimitRedis: Redis | null = null;
 
   constructor(rateLimiter: TenantWebhookRateLimiter = tenantWebhookRateLimiter) {
     this.circuitBreaker = new CircuitBreaker({
@@ -41,22 +69,18 @@ export class WebhookDeliveryService {
     this.compressionThresholdBytes = parseInt(
       process.env.WEBHOOK_COMPRESSION_THRESHOLD_BYTES || "1024"
     );
-    this.rateLimiter = rateLimiter;
+    this.pool = new WorkerPool<DeliveryTask>({
+      concurrency: WORKER_CONCURRENCY,
+      worker: (task) =>
+        this.deliverWebhook(
+          task.subscription,
+          task.event,
+          task.data,
+          task.correlationId
+        ),
+    });
   }
 
-  /**
-   * Resolve the rate-limiter "tenant" key for a subscription.
-   *
-   * There is no dedicated tenant/org column on webhook subscriptions in
-   * this codebase (see `types/webhook.ts` / `services/webhookService.ts`) —
-   * `createdBy` (the address that registered the subscription) is the
-   * closest existing identifier scoping a subscription to one account, so
-   * it is used as the tenant key. Centralizing the lookup here means a
-   * future real tenant/org concept only requires changing this one method.
-   */
-  private getTenantId(subscription: WebhookSubscription): string {
-    return subscription.createdBy;
-  }
   /**
    * Trigger webhooks for an event
    */
@@ -76,12 +100,56 @@ export class WebhookDeliveryService {
       JSON.stringify({ event: 'webhook.trigger', correlationId: cid, webhookEvent: event, subscriptionCount: subscriptions.length })
     );
 
-    // Deliver webhooks in parallel
+    // Deliver through the bounded worker pool. Concurrency is capped by
+    // WEBHOOK_WORKER_CONCURRENCY; once every worker slot is busy, additional
+    // enqueue() calls wait their turn rather than starting immediately —
+    // this is the back-pressure mechanism for high subscription counts.
+    this.reportPoolMetrics();
     await Promise.allSettled(
       subscriptions.map((subscription) =>
-        this.deliverWebhook(subscription, event, data, cid)
+        this.pool.enqueue({ subscription, event, data, correlationId: cid })
       )
     );
+    this.reportPoolMetrics();
+  }
+
+  /**
+   * Publish current worker pool size / queue depth to Prometheus.
+   */
+  private reportPoolMetrics(): void {
+    MetricsCollector.updateWebhookWorkerPool(
+      this.pool.getConcurrency(),
+      this.pool.getQueueDepth()
+    );
+  }
+
+  /**
+   * Enforce the per-tenant delivery rate limit for a subscription's owner.
+   * Uses the same Redis-backed sliding-window limiter as the HTTP
+   * middleware, but invoked directly since delivery happens outside of any
+   * request/response cycle. Fails open (allows delivery) if Redis is
+   * unavailable, matching the existing middleware's fail-open behavior —
+   * a rate-limiter outage must not stop webhook delivery altogether.
+   */
+  private async isWithinTenantRateLimit(tenantId: string): Promise<boolean> {
+    // No Redis configured (e.g. local/test environments) — skip the check
+    // rather than attempting a real network connection on every delivery.
+    if (!process.env.REDIS_URL) {
+      return true;
+    }
+    try {
+      if (!this.rateLimitRedis) {
+        this.rateLimitRedis = createRedisClient();
+      }
+      const count = await incrementSlidingWindow(
+        this.rateLimitRedis,
+        `rl:webhook:delivery:tenant:${tenantId}`,
+        TENANT_RATE_LIMIT_WINDOW_MS
+      );
+      return count <= TENANT_RATE_LIMIT_MAX;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -94,13 +162,29 @@ export class WebhookDeliveryService {
     data: WebhookEventData,
     correlationId?: string
   ): Promise<void> {
+    const cid = correlationId || `whk_${Date.now().toString(36)}`;
+
+    // Per-tenant rate limit: the subscription owner (createdBy) is the
+    // closest thing to a tenant id on this model. One slow retry-after-delay
+    // is attempted before skipping, since a worker holding a pool slot for a
+    // single delayed check is preferable to dropping the delivery outright.
+    const tenantId = subscription.createdBy;
+    if (!(await this.isWithinTenantRateLimit(tenantId))) {
+      await this.delay(TENANT_RATE_LIMIT_WINDOW_MS / TENANT_RATE_LIMIT_MAX);
+      if (!(await this.isWithinTenantRateLimit(tenantId))) {
+        console.warn(
+          JSON.stringify({ event: 'webhook.rate_limited', correlationId: cid, subscriptionId: subscription.id, tenantId })
+        );
+        return;
+      }
+    }
+
     const payload = webhookService.createPayload(
       event,
       data,
       subscription.secret
     );
 
-    const cid = correlationId || `whk_${Date.now().toString(36)}`;
     // Attach correlation ID to payload headers (not body — body is signed)
     const extraHeaders: Record<string, string> = {
       'X-Correlation-Id': cid,
