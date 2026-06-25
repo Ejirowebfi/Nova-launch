@@ -53,6 +53,7 @@ mod timelock;
 mod token_creation;
 mod treasury;
 mod types;
+mod vault;
 mod vesting;
 mod validation;
 
@@ -160,6 +161,9 @@ mod batch_atomicity_test;
 
 #[cfg(test)]
 mod vault_deposit_withdraw_test;
+
+#[cfg(test)]
+mod vault_circuit_breaker_test;
 
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use types::{
@@ -3112,6 +3116,10 @@ impl TokenFactory {
             return Err(Error::InvalidParameters);
         }
 
+        // Per-epoch circuit breaker: reject if a previous trigger paused
+        // withdrawals (#1362).
+        vault::ensure_withdrawals_enabled(env)?;
+
         let claimable = vault
             .total_amount
             .checked_sub(vault.claimed_amount)
@@ -3119,6 +3127,10 @@ impl TokenFactory {
         if claimable <= 0 {
             return Err(Error::NothingToClaim);
         }
+
+        // Record the withdrawal against the per-epoch limit and trip the
+        // breaker if the cumulative volume reaches the cap (#1362).
+        vault::record_withdrawal(env, claimable)?;
 
         // State update before external call (CEI pattern)
         vault.claimed_amount = vault.total_amount;
@@ -3173,6 +3185,52 @@ impl TokenFactory {
         events::emit_vault_cancelled(&env, vault_id, &actor, remaining_amount);
 
         Ok(())
+    }
+
+    /// Configure the per-epoch vault withdrawal circuit breaker limit (admin only, #1362).
+    ///
+    /// The limit caps the cumulative volume of vault withdrawals allowed within
+    /// a single epoch. When the cumulative epoch volume reaches `limit`,
+    /// withdrawals are paused and a `VaultCircuitBreakerTriggered` event is
+    /// emitted. Pass `limit = 0` to disable the breaker entirely.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    /// * `limit` - Per-epoch withdrawal cap (`0` disables the limit)
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    /// * `Error::InvalidParameters` - `limit` is negative
+    pub fn set_vault_withdraw_limit(env: Env, admin: Address, limit: i128) -> Result<(), Error> {
+        vault::set_vault_withdraw_limit(&env, &admin, limit)
+    }
+
+    /// Read the configured per-epoch vault withdrawal limit (`0` = disabled, #1362).
+    pub fn get_vault_withdraw_limit(env: Env) -> i128 {
+        storage::get_vault_withdraw_limit(&env)
+    }
+
+    /// Whether vault withdrawals are currently paused by the circuit breaker (#1362).
+    pub fn is_vault_circuit_breaker_paused(env: Env) -> bool {
+        storage::get_vault_circuit_breaker_paused(&env)
+    }
+
+    /// Manually resume vault withdrawals after a circuit breaker trigger (admin only, #1362).
+    ///
+    /// Intended to be called after governance/admin has reviewed the situation
+    /// that tripped the breaker. Clears the paused flag so vault withdrawals can
+    /// proceed again; the per-epoch volume counter is unchanged and continues to
+    /// reset at the next epoch boundary.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `admin` - Admin address (must authorize and match stored admin)
+    ///
+    /// # Errors
+    /// * `Error::Unauthorized` - Caller is not the admin
+    pub fn resume_vault(env: Env, admin: Address) -> Result<(), Error> {
+        vault::resume_vault(&env, &admin)
     }
 
     /// Mark a vault's milestone as verified (#1133).

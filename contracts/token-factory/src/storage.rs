@@ -1175,6 +1175,58 @@ pub fn get_creator_vault_count(env: &Env, creator: &Address) -> u32 {
         .unwrap_or(0)
 }
 
+// ── Vault circuit breaker storage ─────────────────────────────────────────
+
+/// Default epoch length in ledgers (~1 day at 5s/ledger)
+pub const DEFAULT_EPOCH_LEDGERS: u32 = 17_280;
+
+/// Current epoch number derived from ledger sequence.
+pub fn current_epoch(env: &Env) -> u32 {
+    env.ledger().sequence() / DEFAULT_EPOCH_LEDGERS
+}
+
+/// Cumulative withdrawal volume for the given epoch.
+pub fn get_epoch_withdraw_volume(env: &Env, epoch: u32) -> i128 {
+    env.storage()
+        .temporary()
+        .get(&DataKey::EpochWithdrawVolume(epoch))
+        .unwrap_or(0_i128)
+}
+
+pub fn set_epoch_withdraw_volume(env: &Env, epoch: u32, volume: i128) {
+    env.storage()
+        .temporary()
+        .set(&DataKey::EpochWithdrawVolume(epoch), &volume);
+}
+
+/// Per-epoch withdrawal limit (0 = unlimited / not set).
+pub fn get_vault_withdraw_limit(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::VaultWithdrawLimit)
+        .unwrap_or(0_i128)
+}
+
+pub fn set_vault_withdraw_limit(env: &Env, limit: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::VaultWithdrawLimit, &limit);
+}
+
+/// Whether vault withdrawals are paused by the circuit breaker.
+pub fn get_vault_circuit_breaker_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::VaultCircuitBreakerPaused)
+        .unwrap_or(false)
+}
+
+pub fn set_vault_circuit_breaker_paused(env: &Env, paused: bool) {
+    env.storage()
+        .instance()
+        .set(&DataKey::VaultCircuitBreakerPaused, &paused);
+}
+
 /// Get a page of vaults in ascending vault_id order
 ///
 /// # Parameters
