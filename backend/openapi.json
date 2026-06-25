@@ -1651,171 +1651,195 @@
         }
       }
     },
-    "/api/admin/jobs/failed": {
+    "/api/webhooks/dead-letter": {
       "get": {
-        "tags": ["Admin Jobs"],
-        "summary": "List failed (dead-letter) jobs",
-        "description": "Returns all jobs that have exhausted their retry budget. Supports filtering by job type, error message substring, and creation date range.",
-        "security": [{ "bearerAuth": [] }],
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhook dead-letter entries (admin only)",
+        "description": "Paginated list of failed webhook deliveries that exhausted all retries, across all subscriptions. Supports filtering by tenant (the subscription owner's `createdBy` address — the closest existing field to a tenant identifier in this codebase) and by failure reason (substring match on the last error message).",
+        "security": [{ "BearerAuth": [] }],
         "parameters": [
           {
-            "name": "jobType",
-            "in": "query",
-            "schema": { "type": "string" },
-            "description": "Filter by exact job type name"
+            "$ref": "#/components/parameters/PageParam"
           },
           {
-            "name": "errorCode",
-            "in": "query",
-            "schema": { "type": "string" },
-            "description": "Substring match against the job error message"
+            "$ref": "#/components/parameters/LimitParam"
           },
           {
-            "name": "startDate",
+            "name": "tenant",
             "in": "query",
-            "schema": { "type": "string", "format": "date-time" },
-            "description": "Return only jobs created on or after this ISO 8601 timestamp"
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by subscription owner (created_by) address"
           },
           {
-            "name": "endDate",
+            "name": "failureReason",
             "in": "query",
-            "schema": { "type": "string", "format": "date-time" },
-            "description": "Return only jobs created on or before this ISO 8601 timestamp"
+            "schema": {
+              "type": "string"
+            },
+            "description": "Substring match against the last recorded error message"
           },
           {
-            "name": "limit",
+            "name": "resolved",
             "in": "query",
-            "schema": { "type": "integer", "minimum": 1, "default": 50 },
-            "description": "Maximum number of jobs to return"
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "schema": { "type": "integer", "minimum": 0, "default": 0 },
-            "description": "Number of jobs to skip for pagination"
+            "schema": {
+              "type": "string",
+              "enum": ["true", "false"]
+            },
+            "description": "Filter by resolution status"
           }
         ],
         "responses": {
           "200": {
-            "description": "Paginated list of failed jobs",
+            "description": "Paginated dead-letter entries",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "success": { "type": "boolean" },
+                    "success": {
+                      "type": "boolean"
+                    },
                     "data": {
                       "type": "object",
                       "properties": {
-                        "jobs": {
+                        "entries": {
                           "type": "array",
-                          "items": { "$ref": "#/components/schemas/DeadLetterJob" }
+                          "items": {
+                            "$ref": "#/components/schemas/DeadLetterEntry"
+                          }
                         },
                         "pagination": {
-                          "type": "object",
-                          "properties": {
-                            "total": { "type": "integer" },
-                            "limit": { "type": "integer" },
-                            "offset": { "type": "integer" },
-                            "hasMore": { "type": "boolean" }
-                          }
+                          "$ref": "#/components/schemas/Pagination"
                         }
                       }
-                    },
-                    "timestamp": { "type": "string", "format": "date-time" }
+                    }
                   }
                 }
               }
             }
           },
-          "400": { "description": "Invalid query parameters" },
-          "401": { "description": "Authentication required" },
-          "403": { "description": "Admin access required" }
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          }
         }
       }
     },
-    "/api/admin/jobs/{id}/retry": {
+    "/api/webhooks/dead-letter/{id}/retry": {
       "post": {
-        "tags": ["Admin Jobs"],
-        "summary": "Retry a dead-letter job",
-        "description": "Removes the job from the dead-letter list, resets its retry counter, and re-enqueues it with elevated priority.",
-        "security": [{ "bearerAuth": [] }],
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Retry a dead-lettered delivery (admin only)",
+        "description": "Re-enqueues the original payload for delivery with a fresh attempt counter (does not resume the exhausted counter that originally routed the entry to the dead-letter queue). Writes an audit log entry.",
+        "security": [{ "BearerAuth": [] }],
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" },
-            "description": "Job ID"
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Job re-enqueued successfully",
+            "description": "Entry re-enqueued for delivery"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "404": {
+            "description": "Dead-letter entry or associated subscription not found",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "job": { "$ref": "#/components/schemas/DeadLetterJob" }
-                      }
-                    },
-                    "timestamp": { "type": "string", "format": "date-time" }
-                  }
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
           },
-          "401": { "description": "Authentication required" },
-          "403": { "description": "Admin access required" },
-          "404": { "description": "Job not found in dead-letter list" }
+          "409": {
+            "description": "Entry already resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
         }
       }
     },
-    "/api/admin/jobs/{id}": {
+    "/api/webhooks/dead-letter/{id}": {
       "delete": {
-        "tags": ["Admin Jobs"],
-        "summary": "Discard a dead-letter job",
-        "description": "Permanently removes the job from the dead-letter list. This action is irreversible.",
-        "security": [{ "bearerAuth": [] }],
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Discard a dead-lettered delivery (admin only)",
+        "description": "Marks the dead-letter entry as archived without retrying delivery. Writes an audit log entry.",
+        "security": [{ "BearerAuth": [] }],
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" },
-            "description": "Job ID"
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Job discarded successfully",
+            "description": "Entry discarded"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Admin access required"
+          },
+          "404": {
+            "description": "Dead-letter entry not found",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "discarded": { "type": "boolean" },
-                        "id": { "type": "string" }
-                      }
-                    },
-                    "timestamp": { "type": "string", "format": "date-time" }
-                  }
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
           },
-          "401": { "description": "Authentication required" },
-          "403": { "description": "Admin access required" },
-          "404": { "description": "Job not found in dead-letter list" }
+          "409": {
+            "description": "Entry already resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -2365,6 +2389,73 @@
             "format": "date-time"
           }
         }
+      },
+      "DeadLetterEntry": {
+        "type": "object",
+        "description": "A webhook delivery that exhausted all retry attempts and was routed to the dead-letter store.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "subscriptionId": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "token.burn.self",
+              "token.burn.admin",
+              "token.created",
+              "token.metadata.updated"
+            ]
+          },
+          "payload": {
+            "type": "string",
+            "description": "JSON-stringified original webhook payload"
+          },
+          "statusCode": {
+            "type": "integer",
+            "nullable": true
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true
+          },
+          "attemptCount": {
+            "type": "integer",
+            "description": "Attempts made before exhaustion (pre-retry)"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "retried",
+              "skipped",
+              "archived"
+            ],
+            "nullable": true
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Admin JWT issued for users with role 'admin' or 'super_admin'."
       }
     },
     "parameters": {
