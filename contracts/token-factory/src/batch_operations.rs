@@ -6,7 +6,7 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage;
-use crate::types::{Error, TokenCreationParams};
+use crate::types::{Error, MintOutcome, TokenCreationParams};
 
 /// Maximum number of items allowed in a single batch call.
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -189,6 +189,95 @@ pub fn batch_settle(
     crate::events::emit_batch_settle(env, token_index, &creator, batch_len, total_mint);
 
     Ok(total_mint)
+}
+
+/// Batch-mint to multiple recipients with **per-item failure isolation**.
+///
+/// Unlike [`batch_settle`], a single failing mint does not abort the batch.
+/// Each `(recipient, amount)` pair is processed independently: successful
+/// mints commit their state, while failed ones are reported in the returned
+/// vector and via a `mnt_fail` event — leaving every other item unaffected.
+///
+/// # Isolation guarantee
+/// [`crate::mint::mint`] performs all of its validation (amount, token pause,
+/// existence, max-supply, arithmetic) *before* writing any storage. A returned
+/// `Err` therefore implies no partial write for that item, so capturing the
+/// per-item `Result` yields true state isolation without sub-transactions.
+///
+/// # Batch-level errors (fail fast, before any item is processed)
+/// * `ContractPaused`    – Factory is paused.
+/// * `InvalidParameters` – Empty `mints` list.
+/// * `BatchTooLarge`     – More than `MAX_BATCH_SIZE` items.
+/// * `TokenNotFound`     – `token_index` does not exist.
+/// * `Unauthorized`      – Caller is not the token creator.
+/// * `TokenPaused`       – Token is paused.
+///
+/// # Returns
+/// One [`MintOutcome`] per input item, in input order. `outcomes.get(i)`
+/// describes the result of `mints.get(i)`.
+pub fn batch_mint_isolated(
+    env: &Env,
+    caller: Address,
+    token_index: u32,
+    mints: Vec<(Address, i128)>,
+) -> Result<Vec<MintOutcome>, Error> {
+    if storage::is_paused(env) {
+        return Err(Error::ContractPaused);
+    }
+
+    caller.require_auth();
+
+    let batch_len = mints.len();
+    if batch_len == 0 {
+        return Err(Error::InvalidParameters);
+    }
+    if batch_len > MAX_BATCH_SIZE {
+        return Err(Error::BatchTooLarge);
+    }
+
+    // Batch-level preconditions are checked once up front; only per-item mint
+    // failures are isolated and reported individually below.
+    let token_info = storage::get_token_info(env, token_index).ok_or(Error::TokenNotFound)?;
+    if token_info.creator != caller {
+        return Err(Error::Unauthorized);
+    }
+    if storage::is_token_paused(env, token_index) {
+        return Err(Error::TokenPaused);
+    }
+
+    let mut outcomes = Vec::new(env);
+    for (i, (recipient, amount)) in mints.iter().enumerate() {
+        let index = i as u32;
+        match crate::mint::mint(env, token_index, &recipient, amount) {
+            Ok(()) => {
+                crate::events::emit_mint_succeeded(env, token_index, index, &recipient, amount);
+                outcomes.push_back(MintOutcome {
+                    index,
+                    success: true,
+                    error_code: 0,
+                });
+            }
+            Err(e) => {
+                // `Error` is a thin wrapper over its u32 contract code.
+                let error_code = e.0;
+                crate::events::emit_mint_failed(
+                    env,
+                    token_index,
+                    index,
+                    &recipient,
+                    amount,
+                    error_code,
+                );
+                outcomes.push_back(MintOutcome {
+                    index,
+                    success: false,
+                    error_code,
+                });
+            }
+        }
+    }
+
+    Ok(outcomes)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -468,5 +557,129 @@ mod tests {
         assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
         // No token should have been created.
         assert!(client.get_token_info(&0_u32).is_err());
+    }
+
+    // ── batch_mint_isolated (#1360) ───────────────────────────────────────
+
+    /// Create a single uncapped token owned by `admin` at index 0.
+    fn create_iso_token(env: &Env, client: &crate::TokenFactoryClient, admin: &Address) {
+        client.create_token(
+            admin,
+            &String::from_str(env, "Iso"),
+            &String::from_str(env, "ISO"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
+    }
+
+    #[test]
+    fn batch_mint_isolated_all_success() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_iso_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let r2 = Address::generate(&env);
+        let mints = vec![&env, (r1.clone(), 100_i128), (r2.clone(), 200_i128)];
+
+        let outcomes = client.batch_mint_isolated(&admin, &0_u32, &mints);
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.get(0).unwrap().success);
+        assert!(outcomes.get(1).unwrap().success);
+        assert_eq!(outcomes.get(0).unwrap().error_code, 0);
+
+        // All mints committed.
+        let (b1, b2, supply) = env.as_contract(&contract_id, || {
+            (
+                storage::get_balance(&env, 0, &r1),
+                storage::get_balance(&env, 0, &r2),
+                storage::get_token_info(&env, 0).unwrap().total_supply,
+            )
+        });
+        assert_eq!(b1, 100);
+        assert_eq!(b2, 200);
+        assert_eq!(supply, 1_000_300);
+    }
+
+    #[test]
+    fn batch_mint_isolated_mixed_success_failure() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_iso_token(&env, &client, &admin);
+
+        let r1 = Address::generate(&env);
+        let bad = Address::generate(&env);
+        let r3 = Address::generate(&env);
+        // The middle item has a non-positive amount → isolated InvalidAmount failure.
+        let mints = vec![
+            &env,
+            (r1.clone(), 100_i128),
+            (bad.clone(), 0_i128),
+            (r3.clone(), 300_i128),
+        ];
+
+        let outcomes = client.batch_mint_isolated(&admin, &0_u32, &mints);
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.get(0).unwrap().success);
+        assert!(!outcomes.get(1).unwrap().success, "middle item must fail in isolation");
+        assert!(outcomes.get(2).unwrap().success, "item after a failure must still commit");
+        assert_eq!(
+            outcomes.get(1).unwrap().error_code,
+            crate::types::Error::InvalidAmount.0
+        );
+
+        // Successful items committed; the failed one did not, and supply only
+        // grew by the successful amounts.
+        let (b1, b_bad, b3, supply) = env.as_contract(&contract_id, || {
+            (
+                storage::get_balance(&env, 0, &r1),
+                storage::get_balance(&env, 0, &bad),
+                storage::get_balance(&env, 0, &r3),
+                storage::get_token_info(&env, 0).unwrap().total_supply,
+            )
+        });
+        assert_eq!(b1, 100);
+        assert_eq!(b_bad, 0);
+        assert_eq!(b3, 300);
+        assert_eq!(supply, 1_000_400);
+    }
+
+    #[test]
+    fn batch_mint_isolated_rejects_oversized_batch() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        // 51 items — one over the cap. Rejected before any token lookup.
+        let mut mints = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            mints.push_back((Address::generate(&env), 1_i128));
+        }
+
+        let res = client.try_batch_mint_isolated(&admin, &0_u32, &mints);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            crate::types::Error::BatchTooLarge.into()
+        );
+    }
+
+    #[test]
+    fn batch_mint_isolated_rejects_non_creator() {
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+        create_iso_token(&env, &client, &admin);
+
+        let impostor = Address::generate(&env);
+        let r1 = Address::generate(&env);
+        let mints = vec![&env, (r1, 100_i128)];
+
+        let res = client.try_batch_mint_isolated(&impostor, &0_u32, &mints);
+        assert_eq!(
+            res.unwrap_err().unwrap(),
+            crate::types::Error::Unauthorized.into()
+        );
     }
 }

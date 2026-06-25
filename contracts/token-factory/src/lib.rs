@@ -158,8 +158,8 @@ mod vault_deposit_withdraw_test;
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use types::{
     AuctionStatus, BurnAuction, BuybackCampaign, CampaignStatus, ContractMetadata,
-    DynamicQuorumConfig, Error, FactoryState, PaginationCursor, StreamInfo, StreamPage,
-    StreamParams, TokenCreationParams, TokenInfo, TokenStats, Vault, VaultStatus,
+    DynamicQuorumConfig, Error, FactoryState, MintOutcome, PaginationCursor, StreamInfo,
+    StreamPage, StreamParams, TokenCreationParams, TokenInfo, TokenStats, Vault, VaultStatus,
 };
 use crate::milestone_verification::MilestoneVerifier;
 use crate::snapshot;
@@ -1491,6 +1491,36 @@ impl TokenFactory {
     ) -> Result<i128, Error> {
         storage::acquire_reentrancy_lock(&env)?;
         let result = batch_operations::batch_settle(&env, creator, token_index, recipients);
+        storage::release_reentrancy_lock(&env);
+        result
+    }
+
+    /// Batch-mint to multiple recipients with per-item failure isolation.
+    ///
+    /// Unlike [`batch_settle`](Self::batch_settle), a single failing mint does
+    /// not revert the whole batch: successful mints commit while failed items
+    /// are reported individually in the returned vector and via per-item
+    /// `mnt_ok` / `mnt_fail` events.
+    ///
+    /// # Arguments
+    /// * `caller`      – Token creator (must auth).
+    /// * `token_index` – Index of the token to mint.
+    /// * `mints`       – `(address, amount)` pairs; max `MAX_BATCH_SIZE` (50).
+    ///
+    /// # Returns
+    /// One [`MintOutcome`] per input item, in input order.
+    ///
+    /// # Errors (batch-level, fail fast)
+    /// `ContractPaused`, `InvalidParameters`, `BatchTooLarge`, `TokenNotFound`,
+    /// `Unauthorized`, `TokenPaused`.
+    pub fn batch_mint_isolated(
+        env: Env,
+        caller: Address,
+        token_index: u32,
+        mints: Vec<(Address, i128)>,
+    ) -> Result<Vec<MintOutcome>, Error> {
+        storage::acquire_reentrancy_lock(&env)?;
+        let result = batch_operations::batch_mint_isolated(&env, caller, token_index, mints);
         storage::release_reentrancy_lock(&env);
         result
     }

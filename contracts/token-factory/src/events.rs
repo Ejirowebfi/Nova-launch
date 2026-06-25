@@ -417,6 +417,41 @@ pub fn emit_mint(env: &Env, token_index: u32, to: &Address, amount: i128) {
         .publish((symbol_short!("mint"), token_index), (to, amount));
 }
 
+/// Emit a per-item success event for an isolated batch mint (#1360).
+///
+/// Topic `mnt_ok` corresponds to a `MintSucceeded` outcome. `index` is the
+/// item's position in the input batch.
+pub fn emit_mint_succeeded(
+    env: &Env,
+    token_index: u32,
+    index: u32,
+    to: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("mnt_ok"), token_index),
+        (index, to, amount),
+    );
+}
+
+/// Emit a per-item failure event for an isolated batch mint (#1360).
+///
+/// Topic `mnt_fail` corresponds to a `MintFailed` outcome. `error_code` is the
+/// contract error code that caused this item to be isolated out of the batch.
+pub fn emit_mint_failed(
+    env: &Env,
+    token_index: u32,
+    index: u32,
+    to: &Address,
+    amount: i128,
+    error_code: u32,
+) {
+    env.events().publish(
+        (symbol_short!("mnt_fail"), token_index),
+        (index, to, amount, error_code),
+    );
+}
+
 // ── Treasury events ─────────────────────────────────────────
 
 /// Emit treasury withdrawal event

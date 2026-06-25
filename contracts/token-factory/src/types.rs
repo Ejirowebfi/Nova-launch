@@ -107,6 +107,24 @@ pub struct MetadataRecord {
     pub updated_by: Address,
 }
 
+/// Per-item outcome of an isolated batch-mint operation (#1360).
+///
+/// Soroban cannot return `Vec<Result<(), Error>>` across the contract boundary,
+/// so each input item's outcome is expressed as a value type. Outcomes are
+/// returned in input order, so `outcomes.get(i)` corresponds to `mints.get(i)`.
+///
+/// # Fields
+/// * `index`      – Position of the item in the input batch (0-based).
+/// * `success`    – `true` if the mint committed, `false` if it was isolated out.
+/// * `error_code` – Contract error code on failure; `0` when `success` is true.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MintOutcome {
+    pub index: u32,
+    pub success: bool,
+    pub error_code: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamInfo {
