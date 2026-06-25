@@ -4381,6 +4381,8 @@ mod staking_integration_test;
 #[cfg(all(test, feature = "legacy-tests"))]
 mod vault_cancellation_test;
 
+#[cfg(test)]
+mod vault_deposit_withdraw_test;
 #[cfg(all(test, feature = "legacy-tests"))]
 mod metadata_update_test;
 
