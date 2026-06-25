@@ -58,6 +58,8 @@ mod validation;
 
 #[cfg(test)]
 // mod campaign_state_test;
+#[cfg(test)]
+mod campaign_state_machine_proptest;
 
 #[cfg(test)]
 mod arithmetic_boundary_tests;
