@@ -1,85 +1,17 @@
-/**
- * Token Analytics Service
- *
- * Provides burn analytics for individual tokens with a pre-aggregated
- * time-bucket pipeline to avoid full-table scans on high-activity tokens.
- *
- * Issue: #1357
- */
-
-import { prisma } from "../lib/prisma";
-import { Prisma } from "@prisma/client";
-
-export type Granularity = "hour" | "day" | "week";
-
-export interface PeriodStats {
-  volume: string;
-  count: number;
-  uniqueBurners: number;
-}
-
-export interface TimeSeriesDataPoint {
-  timestamp: string;
-  value: string;
-  count: number;
-}
-
-export interface BurnTypeDistribution {
-  self: string;
-  admin: string;
-  selfPercentage: number;
-  adminPercentage: number;
-}
-
-export interface TokenAnalyticsResponseDto {
-  tokenAddress: string;
-  period: string;
-  generatedAt: string;
-
-  // All-time
-  totalBurned: string;
-  totalBurnCount: number;
-  allTimeUniqueBurners: number;
-  largestBurn: string;
-  largestBurnTx: string;
-
-  // Fixed-window stats
-  stats24h: PeriodStats;
-  stats7d: PeriodStats;
-  stats30d: PeriodStats;
-
-  // Current period
-  periodVolume: string;
-  periodBurnCount: number;
-  periodUniqueBurners: number;
-  averageBurnAmount: string;
-  burnFrequencyPerDay: number;
-
-  // Comparison vs previous period
-  volumeChangePercent: number;
-  countChangePercent: number;
-
-  // Chart data
-  timeSeries: TimeSeriesDataPoint[];
-  burnTypeDistribution: BurnTypeDistribution;
-}
-
-export interface BucketQueryResult {
-  bucketStart: Date;
-  granularity: string;
-  burnVolume: string;
-  transferCount: number;
-  holderCount: number;
-}
-
-/** Shape of an analytics event passed into aggregateIntoBuckets */
-export interface AnalyticsEvent {
-  tokenId: string;
-  burnVolume: bigint;
-  transferCount?: number;
-  holderCount?: number;
-  eventTime: Date;
-}
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository, DataSource } from "typeorm";
+import { BurnEvent, BurnType } from "./entities/burn-event.entity";
+import {
+  TimePeriod,
+  TokenAnalyticsResponseDto,
+  TimeSeriesDataPoint,
+  PeriodStats,
+  AggregateBurnResponseDto,
+  TokenBurnSummaryDto,
+  TopBurnerDto,
+  BurnRateTrendPointDto,
+} from "./dto/analytics.dto";
 
 interface PeriodWindow {
   start: Date;
@@ -202,167 +134,125 @@ export class AnalyticsService {
     };
   }
 
-  /**
-   * Upsert pre-aggregated AnalyticsBucket rows for all three granularities
-   * (hour, day, week) on every new analytics event.
-   *
-   * Called after each new burn/transfer event is persisted so that the
-   * buckets stay current without needing a full table scan.
-   */
-  async aggregateIntoBuckets(event: AnalyticsEvent): Promise<void> {
-    const ops = GRANULARITIES.map((gran) => {
-      const bucketStart = this.truncateToBucket(event.eventTime, gran);
-      return this.db.analyticsBucket.upsert({
-        where: {
-          tokenId_bucketStart_granularity: {
-            tokenId: event.tokenId,
-            bucketStart,
-            granularity: gran,
-          },
-        },
-        create: {
-          tokenId: event.tokenId,
-          bucketStart,
-          granularity: gran,
-          burnVolume: event.burnVolume,
-          transferCount: event.transferCount ?? 0,
-          holderCount: event.holderCount ?? 0,
-        },
-        update: {
-          burnVolume: {
-            increment: event.burnVolume,
-          },
-          transferCount: {
-            increment: event.transferCount ?? 0,
-          },
-          holderCount: {
-            increment: event.holderCount ?? 0,
-          },
-        },
-      });
-    });
+  async getAggregateBurnStats(
+    startDate?: Date,
+    endDate?: Date
+  ): Promise<AggregateBurnResponseDto> {
+    const start = startDate ?? this.daysAgo(30);
+    const end = endDate ?? new Date();
 
-    await Promise.all(ops);
+    const [totals, trend, top5, tokenSummaries] = await Promise.all([
+      this.getAggregateTotals(start, end),
+      this.getAggregateBurnRateTrend(start, end),
+      this.getTop5Burners(start, end),
+      this.getTokenSummaries(start, end),
+    ]);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      totalBurnedAllTokens: totals.totalVolume,
+      totalBurnCount: totals.totalCount,
+      totalUniqueTokens: totals.uniqueTokens,
+      totalUniqueBurners: totals.uniqueBurners,
+      burnRateTrend: trend,
+      top5Burners: top5,
+      tokenSummaries,
+    };
   }
 
-  /**
-   * Paginated backfill: scans existing burn_events for the given tokenId
-   * and populates AnalyticsBucket rows for all granularities.
-   *
-   * Designed for first-run scenarios.  Each page is processed in sequence
-   * to avoid overwhelming the database.
-   */
-  async backfillBuckets(
-    tokenId: string,
-    pageSize = 500
-  ): Promise<{ pagesProcessed: number; eventsProcessed: number }> {
-    let skip = 0;
-    let pagesProcessed = 0;
-    let eventsProcessed = 0;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const rows = await this.queryBurnEventsPage(tokenId, pageSize, skip);
-
-      if (rows.length === 0) break;
-
-      // Group by bucket boundaries for each granularity to minimise upserts
-      const bucketMap = new Map<
-        string,
-        {
-          tokenId: string;
-          bucketStart: Date;
-          granularity: string;
-          burnVolume: bigint;
-          transferCount: number;
-        }
-      >();
-
-      for (const row of rows) {
-        const eventTime = new Date(row.burned_at);
-        const volume = BigInt(row.amount);
-
-        for (const gran of GRANULARITIES) {
-          const bucketStart = this.truncateToBucket(eventTime, gran);
-          const key = `${tokenId}:${gran}:${bucketStart.toISOString()}`;
-          const existing = bucketMap.get(key);
-          if (existing) {
-            existing.burnVolume += volume;
-            existing.transferCount += 1;
-          } else {
-            bucketMap.set(key, {
-              tokenId,
-              bucketStart,
-              granularity: gran,
-              burnVolume: volume,
-              transferCount: 1,
-            });
-          }
-        }
-      }
-
-      // Upsert all accumulated buckets from this page
-      await Promise.all(
-        Array.from(bucketMap.values()).map((b) =>
-          this.db.analyticsBucket.upsert({
-            where: {
-              tokenId_bucketStart_granularity: {
-                tokenId: b.tokenId,
-                bucketStart: b.bucketStart,
-                granularity: b.granularity,
-              },
-            },
-            create: {
-              tokenId: b.tokenId,
-              bucketStart: b.bucketStart,
-              granularity: b.granularity,
-              burnVolume: b.burnVolume,
-              transferCount: b.transferCount,
-              holderCount: 0,
-            },
-            update: {
-              burnVolume: { increment: b.burnVolume },
-              transferCount: { increment: b.transferCount },
-            },
-          })
-        )
-      );
-
-      eventsProcessed += rows.length;
-      pagesProcessed += 1;
-      skip += pageSize;
-
-      if (rows.length < pageSize) break;
-    }
-
-    return { pagesProcessed, eventsProcessed };
+  private async getAggregateTotals(start: Date, end: Date) {
+    const row = await this.dataSource.query(
+      `SELECT
+         COALESCE(SUM(amount::numeric), 0)::text AS "totalVolume",
+         COUNT(*)::int                           AS "totalCount",
+         COUNT(DISTINCT token_address)::int      AS "uniqueTokens",
+         COUNT(DISTINCT burner_address)::int     AS "uniqueBurners"
+       FROM burn_events
+       WHERE burned_at >= $1 AND burned_at < $2`,
+      [start, end]
+    );
+    return row[0] as {
+      totalVolume: string;
+      totalCount: number;
+      uniqueTokens: number;
+      uniqueBurners: number;
+    };
   }
 
-  /**
-   * Query pre-aggregated buckets for a given token, granularity, and window.
-   * Used by the controller when a granularity query param is present.
-   */
-  async getBuckets(
-    tokenId: string,
-    granularity: Granularity,
+  private async getAggregateBurnRateTrend(
     start: Date,
     end: Date
-  ): Promise<BucketQueryResult[]> {
-    const rows = await this.db.analyticsBucket.findMany({
-      where: {
-        tokenId,
-        granularity,
-        bucketStart: { gte: start, lt: end },
-      },
-      orderBy: { bucketStart: "asc" },
-    });
+  ): Promise<BurnRateTrendPointDto[]> {
+    const rows: { day: string; volume: string; count: number }[] =
+      await this.dataSource.query(
+        `SELECT
+           DATE_TRUNC('day', burned_at)::text AS day,
+           COALESCE(SUM(amount::numeric), 0)::text AS volume,
+           COUNT(*)::int AS count
+         FROM burn_events
+         WHERE burned_at >= $1 AND burned_at < $2
+         GROUP BY DATE_TRUNC('day', burned_at)
+         ORDER BY day ASC`,
+        [start, end]
+      );
+
+    return rows.map((r) => ({ date: r.day, volume: r.volume, count: r.count }));
+  }
+
+  private async getTop5Burners(start: Date, end: Date): Promise<TopBurnerDto[]> {
+    const rows: {
+      burner_address: string;
+      total_burned: string;
+      burn_count: number;
+    }[] = await this.dataSource.query(
+      `SELECT
+         burner_address,
+         COALESCE(SUM(amount::numeric), 0)::text AS total_burned,
+         COUNT(*)::int AS burn_count
+       FROM burn_events
+       WHERE burned_at >= $1 AND burned_at < $2
+       GROUP BY burner_address
+       ORDER BY SUM(amount::numeric) DESC
+       LIMIT 5`,
+      [start, end]
+    );
 
     return rows.map((r) => ({
-      bucketStart: r.bucketStart,
-      granularity: r.granularity,
-      burnVolume: r.burnVolume.toString(),
-      transferCount: r.transferCount,
-      holderCount: r.holderCount,
+      walletAddress: r.burner_address,
+      totalBurned: r.total_burned,
+      burnCount: r.burn_count,
+    }));
+  }
+
+  private async getTokenSummaries(
+    start: Date,
+    end: Date
+  ): Promise<TokenBurnSummaryDto[]> {
+    const rows: {
+      token_address: string;
+      total_burned: string;
+      burn_count: number;
+      unique_burners: number;
+    }[] = await this.dataSource.query(
+      `SELECT
+         token_address,
+         COALESCE(SUM(amount::numeric), 0)::text AS total_burned,
+         COUNT(*)::int AS burn_count,
+         COUNT(DISTINCT burner_address)::int AS unique_burners
+       FROM burn_events
+       WHERE burned_at >= $1 AND burned_at < $2
+       GROUP BY token_address
+       ORDER BY SUM(amount::numeric) DESC`,
+      [start, end]
+    );
+
+    return rows.map((r) => ({
+      tokenAddress: r.token_address,
+      totalBurned: r.total_burned,
+      burnCount: r.burn_count,
+      uniqueBurners: r.unique_burners,
     }));
   }
 
