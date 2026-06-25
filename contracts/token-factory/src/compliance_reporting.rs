@@ -213,7 +213,7 @@ fn emit_report_generated(
 mod tests {
     use super::*;
     use crate::{TokenFactory, TokenFactoryClient};
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env};
 
     /// Deploy factory and return (client, admin, contract_id).
     fn setup(env: &Env) -> (TokenFactoryClient, Address, Address) {
@@ -343,9 +343,9 @@ mod tests {
         env.mock_all_auths();
         let (_, admin, contract_id) = setup(&env);
 
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         env.as_contract(&contract_id, || generate_report(&env, &admin).unwrap());
-        let after = env.events().all().len();
+        let after = env.events().all().events().len();
 
         assert_eq!(after, before + 1, "Exactly one event should be emitted");
     }

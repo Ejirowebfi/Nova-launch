@@ -258,7 +258,7 @@ mod tests {
             make_params(&env, "Gamma", "GAM"),
         ];
         // 3 tokens × base_fee (1_000_000 each, no metadata)
-        let indices = client.batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap();
+        let indices = client.batch_reveal(&admin, &tokens, &3_000_000_i128);
 
         assert_eq!(indices.len(), 3);
         assert_eq!(indices.get(0).unwrap(), 0);
@@ -272,8 +272,8 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let tokens: Vec<TokenCreationParams> = vec![&env];
-        let err = client.batch_reveal(&admin, &tokens, &0_i128).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        let err = client.try_batch_reveal(&admin, &tokens, &0_i128).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -282,8 +282,8 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let tokens = vec![&env, make_params(&env, "Alpha", "ALP")];
-        let err = client.batch_reveal(&admin, &tokens, &0_i128).unwrap_err();
-        assert_eq!(err, crate::types::Error::InsufficientFee.into());
+        let err = client.try_batch_reveal(&admin, &tokens, &0_i128).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InsufficientFee);
     }
 
     #[test]
@@ -300,13 +300,13 @@ mod tests {
             metadata_uri: None,
         };
         let tokens = vec![&env, make_params(&env, "Good", "GD"), bad];
-        let err = client.batch_reveal(&admin, &tokens, &2_000_000_i128).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
+        let err = client.try_batch_reveal(&admin, &tokens, &2_000_000_i128).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidTokenParams);
 
         // Token count must remain 0 — no partial writes.
         let state = client.get_state();
         let _ = state; // state is accessible; token count checked via get_token_info
-        let info = client.get_token_info(&0_u32);
+        let info = client.try_get_token_info(&0_u32);
         assert!(info.is_err(), "no token should have been created");
     }
 
@@ -318,17 +318,15 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         // Create a token first.
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.create_token(
+            &admin,
+            &String::from_str(&env, "MyToken"),
+            &String::from_str(&env, "MTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
         let r1 = Address::generate(&env);
         let r2 = Address::generate(&env);
@@ -341,7 +339,7 @@ mod tests {
             (r3.clone(), 300_i128),
         ];
 
-        let total = client.batch_settle(&admin, &0_u32, &recipients).unwrap();
+        let total = client.batch_settle(&admin, &0_u32, &recipients);
         assert_eq!(total, 600_i128);
     }
 
@@ -350,22 +348,20 @@ mod tests {
         let (env, contract_id, admin, _treasury) = setup();
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.create_token(
+            &admin,
+            &String::from_str(&env, "MyToken"),
+            &String::from_str(&env, "MTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
         let r1 = Address::generate(&env);
         let recipients = vec![&env, (r1, 0_i128)];
-        let err = client.batch_settle(&admin, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        let err = client.try_batch_settle(&admin, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -373,23 +369,21 @@ mod tests {
         let (env, contract_id, admin, _treasury) = setup();
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "MyToken"),
-                &String::from_str(&env, "MTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.create_token(
+            &admin,
+            &String::from_str(&env, "MyToken"),
+            &String::from_str(&env, "MTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
         let impostor = Address::generate(&env);
         let r1 = Address::generate(&env);
         let recipients = vec![&env, (r1, 100_i128)];
-        let err = client.batch_settle(&impostor, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::Unauthorized.into());
+        let err = client.try_batch_settle(&impostor, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::Unauthorized);
     }
 
     #[test]
@@ -409,12 +403,12 @@ mod tests {
                 metadata_uri: None,
             },
         ];
-        client.batch_reveal(&admin, &params, &1_000_000_i128).unwrap();
+        client.batch_reveal(&admin, &params, &1_000_000_i128);
 
         let r1 = Address::generate(&env);
         let recipients = vec![&env, (r1, 1_i128)];
-        let err = client.batch_settle(&admin, &0_u32, &recipients).unwrap_err();
-        assert_eq!(err, crate::types::Error::MaxSupplyExceeded.into());
+        let err = client.try_batch_settle(&admin, &0_u32, &recipients).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::MaxSupplyExceeded);
     }
 
     #[test]
@@ -440,7 +434,7 @@ mod tests {
             });
         }
 
-        let indices = client.batch_reveal(&admin, &tokens, &10_000_000_i128).unwrap();
+        let indices = client.batch_reveal(&admin, &tokens, &10_000_000_i128);
         assert_eq!(indices.len(), 10);
     }
 
@@ -464,9 +458,9 @@ mod tests {
             bad,
             make_params(&env, "Good2", "GD2"),
         ];
-        let err = client.batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
+        let err = client.try_batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidTokenParams);
         // No token should have been created.
-        assert!(client.get_token_info(&0_u32).is_err());
+        assert!(client.try_get_token_info(&0_u32).is_err());
     }
 }

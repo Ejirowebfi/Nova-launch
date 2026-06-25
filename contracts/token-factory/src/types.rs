@@ -689,6 +689,28 @@ pub enum DataKey {
     DistributionClaimed(u32, Address),
     /// Running total of amounts claimed for a distribution
     DistributionClaimedTotal(u32),
+    // Cross-contract trusted caller allowlist
+    TrustedCaller(Address),
+    // Role-based access control: (token_index, address, role_discriminant)
+    TokenRole(u32, Address, u32),
+    // Cross-contract multisig
+    MultiSigConfig,
+    MultiSigProposal(u64),
+    MultiSigProposalCount,
+    MultiSigApproval(u64, Address),
+    // Asset fractionalization
+    AssetToVault(BytesN<32>),
+    OwnerFractionalVaultCount(Address),
+    FractionalVault(u64),
+    FractionalVaultCount,
+    FractionalVaultByOwner(Address, u32),
+    // Per-token freeze allowlist: (token_address, address)
+    FrozenAddress(Address, Address),
+    // Scheduled burns
+    BurnSchedule(u64),
+    BurnScheduleCount,
+    // Metadata update history count: token_index
+    MetadataHistoryCount(u32),
 }
 
 /// A point-in-time record of a token holder's balance.
@@ -991,6 +1013,8 @@ impl Error {
     pub const DistributionAlreadyClaimed: Self = Self(103);
     pub const DistributionAlreadyReclaimed: Self = Self(104);
     pub const DistributionZeroSupply: Self = Self(105);
+    // Multisig errors
+    pub const DuplicateSigners: Self = Self(106);
 }
 
 impl From<Error> for soroban_sdk::Error {

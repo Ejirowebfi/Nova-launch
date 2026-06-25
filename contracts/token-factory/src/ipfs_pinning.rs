@@ -248,7 +248,7 @@ mod tests {
         types::{Error, TokenInfo},
         TokenFactory, TokenFactoryClient,
     };
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env, String};
 
     /// Seed a minimal TokenInfo so pin functions can look up creator/admin.
     fn seed_token(env: &Env, contract_id: &Address, token_index: u32, creator: &Address) {
@@ -264,6 +264,7 @@ mod tests {
             total_burned: 0,
             burn_count: 0,
             metadata_uri: None,
+            metadata_version: 0,
             created_at: 0,
             is_paused: false,
             clawback_enabled: false,
@@ -536,11 +537,11 @@ mod tests {
         let creator = Address::generate(&env);
         seed_token(&env, &contract_id, 0, &creator);
 
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         env.as_contract(&contract_id, || {
             add_pin(&env, &creator, 0, make_uri(&env, "ipfs://QmEv")).unwrap()
         });
-        assert_eq!(env.events().all().len(), before + 1);
+        assert_eq!(env.events().all().events().len(), before + 1);
     }
 
     #[test]
@@ -555,11 +556,11 @@ mod tests {
             add_pin(&env, &creator, 0, make_uri(&env, "ipfs://QmEv")).unwrap()
         });
 
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         env.as_contract(&contract_id, || {
             deactivate_pin(&env, &creator, 0, 0).unwrap()
         });
-        assert_eq!(env.events().all().len(), before + 1);
+        assert_eq!(env.events().all().events().len(), before + 1);
     }
 
     // ── Integration ───────────────────────────────────────────────────────────

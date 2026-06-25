@@ -1626,7 +1626,7 @@ mod cancel_proposal_tests {
 }
 
 #[cfg(test)]
-mod cancel_proposal_tests {
+mod cancel_proposal_tests_v2 {
     use super::*;
     use crate::test_helpers::fee_change_payload;
     use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env};
