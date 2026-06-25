@@ -428,26 +428,22 @@ model IntegrationState {
   updatedAt DateTime @updatedAt
 }
 
-/// Pre-aggregated time-bucket rows for token analytics.
-/// One row per (tokenId, bucketStart, granularity) combination.
-/// Maintained incrementally on each new analytics event and via a paginated backfill
-/// so that dashboard queries read from this table instead of doing full scans.
-model AnalyticsBucket {
-  id            String   @id @default(uuid())
-  tokenId       String
-  /// UTC-aligned bucket start (truncated to the granularity boundary)
-  bucketStart   DateTime
-  /// One of "hour" | "day" | "week"
-  granularity   String
-  burnVolume    Decimal  @default(0) @db.Decimal(78, 0)
-  transferCount Int      @default(0)
-  holderCount   Int      @default(0)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+/// Frontend ErrorBoundary reports, enriched with whatever Stellar transaction
+/// context (txHash/ledger/wallet/route) was in flight when the render error
+/// was caught. Never stores private keys, seed phrases, or signed payloads.
+model ErrorReport {
+  id             String   @id @default(uuid())
+  message        String
+  stack          String?
+  componentStack String?
+  txHash         String?
+  ledgerSequence Int?
+  walletAddress  String?
+  route          String?
+  network        String?
+  createdAt      DateTime @default(now())
 
-  @@unique([tokenId, bucketStart, granularity])
-  @@index([tokenId])
-  @@index([tokenId, granularity, bucketStart])
-  @@index([bucketStart])
-  @@index([granularity])
+  @@index([createdAt])
+  @@index([txHash])
+  @@index([walletAddress])
 }
