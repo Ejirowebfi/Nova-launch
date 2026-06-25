@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { StellarService } from '../../services/stellar.service';
 import { TreasuryPolicyCard } from './TreasuryPolicyCard';
 import { TimelockConfigCard } from './TimelockConfigCard';
+import { IPFSPinMonitor } from './IPFSPinMonitor';
 import type { AdminPanelLoadState, AdminPanelState } from '../../types/admin';
 
 interface Props {
@@ -272,6 +273,11 @@ export function FactoryAdminPanel({ network = 'testnet', onPrivilegedAction }: P
               />
             </div>
           )}
+
+          {/* IPFS pin monitor — backend-backed section, independent of on-chain load state */}
+          <div className="md:col-span-2">
+            <IPFSPinMonitor />
+          </div>
         </div>
       )}
     </div>
