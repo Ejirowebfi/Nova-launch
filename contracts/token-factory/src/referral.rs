@@ -257,20 +257,18 @@ mod tests {
         let referee = Address::generate(&env);
 
         // Register referral.
-        client.register_referral(&referee, &referrer).unwrap();
+        client.register_referral(&referee, &referrer);
 
         // Deploy a token as the referee.
-        client
-            .create_token(
-                &referee,
-                &String::from_str(&env, "RefToken"),
-                &String::from_str(&env, "RTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.create_token(
+            &referee,
+            &String::from_str(&env, "RefToken"),
+            &String::from_str(&env, "RTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
         // Commission = 5% of 1_000_000 = 50_000.
         let earned = client.get_referral_earned(&referrer);
@@ -283,8 +281,8 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let user = Address::generate(&env);
-        let err = client.register_referral(&user, &user).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        let err = client.try_register_referral(&user, &user).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -295,9 +293,9 @@ mod tests {
         let referrer = Address::generate(&env);
         let referee = Address::generate(&env);
 
-        client.register_referral(&referee, &referrer).unwrap();
-        let err = client.register_referral(&referee, &referrer).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        client.register_referral(&referee, &referrer);
+        let err = client.try_register_referral(&referee, &referrer).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -305,7 +303,7 @@ mod tests {
         let (env, contract_id, admin, _treasury) = setup();
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
-        client.set_commission_rate(&admin, &1_000_u32).unwrap();
+        client.set_commission_rate(&admin, &1_000_u32);
         assert_eq!(client.get_commission_rate(), 1_000_u32);
     }
 
@@ -314,8 +312,8 @@ mod tests {
         let (env, contract_id, admin, _treasury) = setup();
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
-        let err = client.set_commission_rate(&admin, &3_000_u32).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        let err = client.try_set_commission_rate(&admin, &3_000_u32).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -324,8 +322,8 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let impostor = Address::generate(&env);
-        let err = client.set_commission_rate(&impostor, &100_u32).unwrap_err();
-        assert_eq!(err, crate::types::Error::Unauthorized.into());
+        let err = client.try_set_commission_rate(&impostor, &100_u32).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::Unauthorized);
     }
 
     #[test]
@@ -336,20 +334,18 @@ mod tests {
         let referrer = Address::generate(&env);
         let referee = Address::generate(&env);
 
-        client.register_referral(&referee, &referrer).unwrap();
-        client
-            .create_token(
-                &referee,
-                &String::from_str(&env, "RefToken"),
-                &String::from_str(&env, "RTK"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.register_referral(&referee, &referrer);
+        client.create_token(
+            &referee,
+            &String::from_str(&env, "RefToken"),
+            &String::from_str(&env, "RTK"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
-        let paid = client.payout_commission(&admin, &referrer).unwrap();
+        let paid = client.payout_commission(&admin, &referrer);
         assert_eq!(paid, 50_000_i128);
 
         // Balance should be reset.
@@ -362,8 +358,8 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         let referrer = Address::generate(&env);
-        let err = client.payout_commission(&admin, &referrer).unwrap_err();
-        assert_eq!(err, crate::types::Error::InvalidParameters.into());
+        let err = client.try_payout_commission(&admin, &referrer).unwrap_err().unwrap();
+        assert_eq!(err, crate::types::Error::InvalidParameters);
     }
 
     #[test]
@@ -372,17 +368,15 @@ mod tests {
         let client = crate::TokenFactoryClient::new(&env, &contract_id);
 
         // Deploy without registering a referral.
-        client
-            .create_token(
-                &admin,
-                &String::from_str(&env, "NoRef"),
-                &String::from_str(&env, "NRF"),
-                &7_u32,
-                &1_000_000_i128,
-                &None,
-                &1_000_000_i128,
-            )
-            .unwrap();
+        client.create_token(
+            &admin,
+            &String::from_str(&env, "NoRef"),
+            &String::from_str(&env, "NRF"),
+            &7_u32,
+            &1_000_000_i128,
+            &None,
+            &1_000_000_i128,
+        );
 
         // No referrer — earned should be 0.
         assert_eq!(client.get_referral_earned(&admin), 0_i128);

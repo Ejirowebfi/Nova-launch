@@ -811,50 +811,28 @@ pub enum DataKey {
     DistributionClaimed(u32, Address),
     /// Running total of amounts claimed for a distribution
     DistributionClaimedTotal(u32),
-    // Address freezing / transfer restrictions
-    /// Whether an address is frozen for a given token: (token_address, address)
-    FrozenAddress(Address, Address),
-    // Fractionalization
-    /// Fractional vault keyed by vault_id
-    FractionalVault(u64),
-    /// Total number of fractional vaults created
-    FractionalVaultCount,
-    /// Number of fractional vaults owned by an address
-    OwnerFractionalVaultCount(Address),
-    /// Fractional vault id by owner and index: (owner, index)
-    FractionalVaultByOwner(Address, u32),
-    /// Underlying asset id to fractional vault id mapping
-    AssetToVault(BytesN<32>),
-    // Role-based access control
-    /// Per-token role grant: (token_index, address, role_discriminant)
-    TokenRole(u32, Address, u32),
-    // Metadata history
-    /// Number of metadata history records for a token
-    MetadataHistoryCount(u32),
-    // Multi-signature admin operations
-    /// Multi-sig configuration (signers + threshold)
-    MultiSigConfig,
-    /// Total number of multi-sig proposals created
-    MultiSigProposalCount,
-    /// Multi-sig proposal keyed by proposal id
-    MultiSigProposal(u64),
-    /// Whether a signer has approved a multi-sig proposal: (proposal_id, approver)
-    MultiSigApproval(u64, Address),
-    // Burn scheduling
-    /// Total number of burn schedules created
-    BurnScheduleCount,
-    /// Burn schedule keyed by schedule id
-    BurnSchedule(u64),
-    // Cross-contract trusted callers
-    /// Whether an address is a registered trusted caller
+    // Cross-contract trusted caller allowlist
     TrustedCaller(Address),
-    // Fee governance (#1385)
-    /// Fee update proposal keyed by proposal_id
-    FeeUpdateProposal(u64),
-    /// Total number of fee update proposals created
-    FeeProposalCount,
-    /// Whether an address has voted on a fee update proposal: (proposal_id, voter)
-    FeeProposalVote(u64, Address),
+    // Role-based access control: (token_index, address, role_discriminant)
+    TokenRole(u32, Address, u32),
+    // Cross-contract multisig
+    MultiSigConfig,
+    MultiSigProposal(u64),
+    MultiSigProposalCount,
+    MultiSigApproval(u64, Address),
+    // Asset fractionalization
+    AssetToVault(BytesN<32>),
+    OwnerFractionalVaultCount(Address),
+    FractionalVault(u64),
+    FractionalVaultCount,
+    FractionalVaultByOwner(Address, u32),
+    // Per-token freeze allowlist: (token_address, address)
+    FrozenAddress(Address, Address),
+    // Scheduled burns
+    BurnSchedule(u64),
+    BurnScheduleCount,
+    // Metadata update history count: token_index
+    MetadataHistoryCount(u32),
 }
 
 /// A point-in-time record of a token holder's balance.
@@ -1157,7 +1135,7 @@ impl Error {
     pub const DistributionAlreadyClaimed: Self = Self(103);
     pub const DistributionAlreadyReclaimed: Self = Self(104);
     pub const DistributionZeroSupply: Self = Self(105);
-    // Multi-sig configuration errors
+    // Multisig errors
     pub const DuplicateSigners: Self = Self(106);
 }
 

@@ -424,7 +424,7 @@ pub fn emit_clawback_audit(
     amount: i128,
 ) {
     env.events().publish(
-        (symbol_short!("clawb_au1"), token_address.clone()),
+        (symbol_short!("clwb_au1"), token_address.clone()),
         (actor.clone(), target.clone(), amount),
     );
 }
@@ -1764,89 +1764,56 @@ pub fn emit_dividend_reclaimed(
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Multi-Signature Admin Operation Events
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Emitted when the multi-sig signer set / threshold is configured.
+/// Emitted when the cross-contract multisig signer set/threshold is configured.
 ///
 /// **Schema Version**: 1
-/// **Event Name**: msig_cfg1
-///
-/// **Payload**:
-/// - admin: Address
-/// - threshold: u32
-/// - signer_count: u32
+/// **Event Name**: ms_cfg_v1
 pub fn emit_multisig_configured(env: &Env, admin: &Address, threshold: u32, signer_count: u32) {
     env.events().publish(
-        (symbol_short!("msig_cfg1"),),
-        (admin.clone(), threshold, signer_count),
+        (symbol_short!("ms_cfg_v1"),),
+        (admin, threshold, signer_count),
     );
 }
 
-/// Emitted when a new multi-sig proposal is created.
+/// Emitted when a new multisig proposal is created.
 ///
 /// **Schema Version**: 1
-/// **Event Name**: msig_pr1
-///
-/// **Topics** (indexed):
-/// - proposal_id: u64
-///
-/// **Payload**:
-/// - proposer: Address
+/// **Event Name**: ms_prp_v1
 pub fn emit_multisig_proposed(env: &Env, proposal_id: u64, proposer: &Address) {
     env.events()
-        .publish((symbol_short!("msig_pr1"), proposal_id), (proposer.clone(),));
+        .publish((symbol_short!("ms_prp_v1"), proposal_id), (proposer,));
 }
 
-/// Emitted when a signer approves a multi-sig proposal.
+/// Emitted when a signer approves a multisig proposal.
 ///
 /// **Schema Version**: 1
-/// **Event Name**: msig_ap1
-///
-/// **Topics** (indexed):
-/// - proposal_id: u64
-///
-/// **Payload**:
-/// - approver: Address
-/// - approval_count: u32
-pub fn emit_multisig_approved(env: &Env, proposal_id: u64, approver: &Address, approval_count: u32) {
+/// **Event Name**: ms_apr_v1
+pub fn emit_multisig_approved(
+    env: &Env,
+    proposal_id: u64,
+    approver: &Address,
+    approval_count: u32,
+) {
     env.events().publish(
-        (symbol_short!("msig_ap1"), proposal_id),
-        (approver.clone(), approval_count),
+        (symbol_short!("ms_apr_v1"), proposal_id),
+        (approver, approval_count),
     );
 }
 
-/// Emitted when a pending multi-sig proposal is cancelled.
+/// Emitted when a multisig proposal is cancelled.
 ///
 /// **Schema Version**: 1
-/// **Event Name**: msig_cn1
-///
-/// **Topics** (indexed):
-/// - proposal_id: u64
-///
-/// **Payload**:
-/// - cancelled_by: Address
-pub fn emit_multisig_cancelled(env: &Env, proposal_id: u64, cancelled_by: &Address) {
-    env.events().publish(
-        (symbol_short!("msig_cn1"), proposal_id),
-        (cancelled_by.clone(),),
-    );
+/// **Event Name**: ms_cnl_v1
+pub fn emit_multisig_cancelled(env: &Env, proposal_id: u64, canceller: &Address) {
+    env.events()
+        .publish((symbol_short!("ms_cnl_v1"), proposal_id), (canceller,));
 }
 
-/// Emitted when a multi-sig proposal is executed (threshold reached).
+/// Emitted when a multisig proposal is executed.
 ///
 /// **Schema Version**: 1
-/// **Event Name**: msig_ex1
-///
-/// **Topics** (indexed):
-/// - proposal_id: u64
-///
-/// **Payload**:
-/// - executor: Address
+/// **Event Name**: ms_exe_v1
 pub fn emit_multisig_executed(env: &Env, proposal_id: u64, executor: &Address) {
-    env.events().publish(
-        (symbol_short!("msig_ex1"), proposal_id),
-        (executor.clone(),),
-    );
+    env.events()
+        .publish((symbol_short!("ms_exe_v1"), proposal_id), (executor,));
 }

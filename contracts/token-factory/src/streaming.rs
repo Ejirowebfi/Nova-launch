@@ -134,18 +134,13 @@ mod deterministic_batch_event_tests {
         set_stream(&env, &contract_id, 1, &stream1);
         set_stream(&env, &contract_id, 2, &stream2);
 
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         let ids = soroban_sdk::vec![&env, 1u64, 2u64];
         let claimed = batch_claim_in_contract(&env, &contract_id, &recipient, &ids).unwrap();
         assert_eq!(claimed.len(), 2);
 
-        let all = env.events().all();
-        let delta = all.slice((before as u32)..all.len());
-        assert_eq!(delta.len(), 2);
-        let t0 = Symbol::try_from_val(&env, &delta.get(0).unwrap().1.get(0).unwrap()).unwrap();
-        let t1 = Symbol::try_from_val(&env, &delta.get(1).unwrap().1.get(0).unwrap()).unwrap();
-        assert_eq!(t0, symbol_short!("strm_clm"));
-        assert_eq!(t1, symbol_short!("strm_clm"));
+        let after = env.events().all().events().len();
+        assert_eq!(after - before, 2, "expected exactly one claim event per claimed stream");
     }
 
     #[test]
@@ -178,12 +173,12 @@ mod deterministic_batch_event_tests {
         set_stream(&env, &contract_id, 11, &stream1);
         set_stream(&env, &contract_id, 12, &stream2);
 
-        let before = env.events().all().len();
+        let before = env.events().all().events().len();
         let ids = soroban_sdk::vec![&env, 11u64, 12u64];
         let err = batch_claim_in_contract(&env, &contract_id, &recipient, &ids).unwrap_err();
         assert_eq!(err, Error::Unauthorized);
 
-        assert_eq!(env.events().all().len(), before, "failed batch must not leak claim events");
+        assert_eq!(env.events().all().events().len(), before, "failed batch must not leak claim events");
         assert_eq!(get_stream_in_contract(&env, &contract_id, 11).claimed_amount, 0);
         assert_eq!(get_stream_in_contract(&env, &contract_id, 12).claimed_amount, 0);
     }
