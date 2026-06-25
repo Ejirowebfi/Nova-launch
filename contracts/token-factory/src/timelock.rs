@@ -572,6 +572,19 @@ pub fn create_proposal(
     let proposal_id = storage::get_next_proposal_id(env);
     storage::increment_proposal_count(env);
 
+    // Snapshot circulating supply (sum of total_supply across all deployed tokens)
+    // at proposal creation time so quorum is not affected by future supply changes.
+    let circulating_supply_snapshot: i128 = {
+        let token_count = storage::get_token_count(env);
+        let mut supply_sum: i128 = 0;
+        for i in 0..token_count {
+            if let Some(info) = storage::get_token_info(env, i) {
+                supply_sum = supply_sum.saturating_add(info.total_supply);
+            }
+        }
+        supply_sum
+    };
+
     // Create proposal
     let proposal = Proposal {
         id: proposal_id,
@@ -591,6 +604,7 @@ pub fn create_proposal(
         state: crate::types::ProposalState::Created,
         executed_at: None,
         cancelled_at: None,
+        circulating_supply_snapshot,
     };
 
     // Persist proposal
@@ -1194,17 +1208,12 @@ pub fn finalize_proposal(env: &Env, proposal_id: u64) -> Result<(), Error> {
     let config = storage::get_governance_config(env);
     let total_votes = proposal.votes_for + proposal.votes_against + proposal.votes_abstain;
 
-    // Token-weighted quorum: eligible weight = sum of all token total supplies.
-    // Falls back to vote count if no tokens have been deployed yet.
-    let total_eligible: i128 = {
-        let token_count = storage::get_token_count(env);
-        let mut supply_sum: i128 = 0;
-        for i in 0..token_count {
-            if let Some(info) = storage::get_token_info(env, i) {
-                supply_sum = supply_sum.saturating_add(info.total_supply);
-            }
-        }
-        if supply_sum > 0 { supply_sum } else { total_votes.max(1) }
+    // Use the circulating supply snapshotted at proposal creation as the quorum
+    // denominator. Fall back to vote count if no tokens existed at creation time.
+    let total_eligible: i128 = if proposal.circulating_supply_snapshot > 0 {
+        proposal.circulating_supply_snapshot
+    } else {
+        total_votes.max(1)
     };
 
     let quorum_met = crate::governance::is_quorum_met(

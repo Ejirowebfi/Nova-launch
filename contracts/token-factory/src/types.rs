@@ -1235,6 +1235,10 @@ pub struct Proposal {
     pub state: ProposalState,
     pub executed_at: Option<u64>,
     pub cancelled_at: Option<u64>,
+    /// Circulating supply (sum of all token `total_supply`) snapshotted at proposal
+    /// creation time. Used as the denominator for quorum calculations so that
+    /// supply changes after creation do not affect the quorum requirement.
+    pub circulating_supply_snapshot: i128,
 }
 
 /// Pagination cursor for token queries
