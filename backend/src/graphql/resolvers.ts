@@ -53,6 +53,7 @@ export const SUBSCRIPTION_TOPICS = {
   tokenDeployed: "token.deployed",
   burnExecuted: "burn.executed",
   proposalStatusChanged: "governance.proposal.statusChanged",
+  proposalVoteCast: "governance.proposal.voteCast",
   vaultMatured: "vault.matured",
   campaignStepExecuted: "campaign.step_executed",
 } as const;
@@ -97,6 +98,19 @@ export interface ProposalStatusChangedPayload extends TenantScopedPayload {
   tokenAddress: string;
   status: string;
   previousStatus?: string | null;
+  txHash: string;
+  timestamp: string;
+}
+
+export interface ProposalVoteCastPayload extends TenantScopedPayload {
+  proposalId: number;
+  tokenAddress: string;
+  voter: string;
+  support: boolean;
+  weight: string | bigint;
+  votesFor: string | bigint;
+  votesAgainst: string | bigint;
+  reason?: string | null;
   txHash: string;
   timestamp: string;
 }
@@ -408,6 +422,21 @@ export const resolvers = {
         ),
       resolve: (payload: ProposalStatusChangedPayload) =>
         bigintToString(payload),
+    },
+
+    proposalVoteCast: {
+      subscribe: (
+        _root: unknown,
+        args: { proposalId?: number | null },
+        ctx: SubscriptionContext
+      ) =>
+        eventBusAsyncIterator<ProposalVoteCastPayload>(
+          SUBSCRIPTION_TOPICS.proposalVoteCast,
+          (p) =>
+            tenantOwnsEvent(ctx, p) &&
+            (args.proposalId == null || p.proposalId === args.proposalId)
+        ),
+      resolve: (payload: ProposalVoteCastPayload) => bigintToString(payload),
     },
 
     vaultMatured: {

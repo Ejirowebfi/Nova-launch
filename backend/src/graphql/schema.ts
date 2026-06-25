@@ -246,22 +246,18 @@ export const typeDefs = /* GraphQL */ `
     timestamp: DateTime!
   }
 
-  enum BuybackStepStatus {
-    PENDING
-    COMPLETED
-    FAILED
-  }
-
-  type CampaignStepExecutedEvent {
-    campaignId: Int!
-    stepNumber: Int!
-    amount: String!
-    status: BuybackStepStatus!
+  type ProposalVoteCastEvent {
+    proposalId: Int!
+    tokenAddress: String!
+    creatorAddress: String!
+    voter: String!
+    support: Boolean!
+    weight: String!
+    votesFor: String!
+    votesAgainst: String!
+    reason: String
     txHash: String!
-    executedAt: DateTime!
-    totalSteps: Int!
-    executedAmount: String!
-    campaignStatus: CampaignStatus!
+    timestamp: DateTime!
   }
 
   # ── Root Subscription ───────────────────────────────────────────────────────
@@ -280,6 +276,12 @@ export const typeDefs = /* GraphQL */ `
     # Emitted when a governance proposal transitions status. Optionally filter
     # to the proposals of a specific token address.
     proposalStatusChanged(tokenAddress: String): ProposalStatusChangedEvent!
+
+    # Emitted whenever a vote is cast on a governance proposal. Optionally
+    # filter to a specific proposal (by its on-chain proposalId). Carries the
+    # running for/against tallies so subscribers can update vote counts and
+    # quorum progress without a full refetch.
+    proposalVoteCast(proposalId: Int): ProposalVoteCastEvent!
 
     # Emitted when a vesting vault matures. Optionally filter to a recipient.
     vaultMatured(recipientAddress: String): VaultMaturedEvent!
