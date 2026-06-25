@@ -107,22 +107,22 @@ pub struct MetadataRecord {
     pub updated_by: Address,
 }
 
-/// Per-item outcome of an isolated batch-mint operation (#1360).
+/// A single milestone that gates a portion of a token stream.
 ///
-/// Soroban cannot return `Vec<Result<(), Error>>` across the contract boundary,
-/// so each input item's outcome is expressed as a value type. Outcomes are
-/// returned in input order, so `outcomes.get(i)` corresponds to `mints.get(i)`.
-///
-/// # Fields
-/// * `index`      – Position of the item in the input batch (0-based).
-/// * `success`    – `true` if the mint committed, `false` if it was isolated out.
-/// * `error_code` – Contract error code on failure; `0` when `success` is true.
+/// The `oracle_address` must call `verify_stream_milestone` to unlock the
+/// `unlock_amount`. Once verified, that amount becomes claimable by the
+/// stream recipient on top of any time-vested balance.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MintOutcome {
-    pub index: u32,
-    pub success: bool,
-    pub error_code: u32,
+pub struct Milestone {
+    /// Human-readable description (max 256 chars).
+    pub description: String,
+    /// Address whose `require_auth` approval unlocks this milestone.
+    pub oracle_address: Address,
+    /// Token amount (smallest unit) unlocked when this milestone is verified.
+    pub unlock_amount: i128,
+    /// Whether this milestone has been verified by the oracle.
+    pub verified: bool,
 }
 
 #[contracttype]
@@ -141,6 +141,9 @@ pub struct StreamInfo {
     pub cancelled: bool,
     pub paused: bool,
     pub disputed: bool,
+    /// Optional list of milestones that gate additional unlock amounts.
+    /// An empty Vec means this is a pure time-based stream (no milestones).
+    pub milestones: Vec<Milestone>,
 }
 
 #[contracttype]
