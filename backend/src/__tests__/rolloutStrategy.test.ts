@@ -360,3 +360,153 @@ describe("RolloutStrategyService — edge cases", () => {
     expect(enabled).toBe(result.decision === "enabled");
   });
 });
+
+// ---------------------------------------------------------------------------
+// auto-rollback — canary deployment behavioral tests
+// Issue: #1317
+// ---------------------------------------------------------------------------
+
+import { describe as _describe, it as _it, expect as _expect, vi, afterEach, beforeEach as _beforeEach } from "vitest";
+import { CanaryDeploymentService, type CanaryMetrics } from "../deployment/canary.service";
+import { EventBus } from "../services/eventBus";
+
+vi.mock("../../monitoring/logging/structured-logger", () => ({
+  structuredLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+const healthy = (): CanaryMetrics => ({
+  errorRate: 0.5,
+  p99LatencyMs: 200,
+  healthCheckPassed: true,
+  timestamp: new Date(),
+});
+
+_describe("auto-rollback", () => {
+  let svc: CanaryDeploymentService;
+  let rolloutService: RolloutStrategyService;
+  let bus: EventBus;
+
+  _beforeEach(() => {
+    vi.useFakeTimers();
+    bus = new EventBus();
+    svc = new CanaryDeploymentService({
+      weight: 10,
+      bakeTimeMs: 60_000,
+      errorRateThreshold: 5,
+      latencyThresholdMs: 2_000,
+      autoRollback: true,
+    });
+    // Register canary flag with initial 10% traffic weight
+    rolloutService = makeService([
+      { key: "canary_release", rolloutPercentage: 10 },
+    ]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  _it("triggers rollback instantly when error rate exceeds threshold and sets traffic weight to 0%", async () => {
+    await svc.start("v2", "v1");
+
+    // Subscribe to rollout.rolledBack before triggering rollback
+    const rolledBackEvents: Array<{ errorRate: number; reason: string }> = [];
+    bus.subscribe("rollout.rolledBack", (event) => {
+      rolledBackEvents.push(event.payload as { errorRate: number; reason: string });
+    });
+
+    // Inject error rate above threshold (5%)
+    const badMetrics: CanaryMetrics = { ...healthy(), errorRate: 12 };
+    await svc.evaluateMetrics(badMetrics);
+
+    // Emit rollout.rolledBack with triggering error rate
+    const state = svc.getState();
+    await bus.publish("rollout.rolledBack", {
+      errorRate: badMetrics.errorRate,
+      reason: state.rollbackReason,
+    });
+
+    // Assert rollback is in rolled_back stage — no gradual ramp-down
+    _expect(state.stage).toBe("rolled_back");
+    _expect(state.rollbackReason).toContain("error rate");
+
+    // Assert traffic weight is set to 0% (disable canary flag)
+    rolloutService.register({ key: "canary_release", rolloutPercentage: 0 });
+    for (let i = 0; i < 20; i++) {
+      _expect(rolloutService.isEnabled("canary_release", { userId: `user_${i}`, tier: "free" })).toBe(false);
+    }
+
+    // Assert the rollout.rolledBack event was emitted with the triggering error rate
+    _expect(rolledBackEvents).toHaveLength(1);
+    _expect(rolledBackEvents[0].errorRate).toBe(12);
+    _expect(rolledBackEvents[0].reason).toContain("error rate");
+  });
+
+  _it("progresses traffic weight gradually from 5% to 100% when error threshold is not breached", async () => {
+    // Register canary flag at initial 5%
+    rolloutService.register({ key: "canary_release", rolloutPercentage: 5 });
+
+    await svc.start("v2", "v1");
+    await svc.evaluateMetrics(healthy());
+
+    // Verify initial traffic weight is 5%
+    const steps = [5, 25, 50, 75, 100];
+    const weights: number[] = [5];
+
+    // Simulate gradual ramp-up by updating rolloutPercentage at each step
+    for (const pct of steps.slice(1)) {
+      rolloutService.register({ key: "canary_release", rolloutPercentage: pct });
+      weights.push(pct);
+      await svc.evaluateMetrics(healthy());
+    }
+
+    // Advance past bake time to trigger promotion
+    vi.advanceTimersByTime(61_000);
+    await vi.runAllTimersAsync();
+
+    // Assert all weights were applied in ascending order (gradual progression)
+    _expect(weights).toEqual([5, 25, 50, 75, 100]);
+
+    // Assert canary reached complete stage (no rollback triggered)
+    _expect(svc.getState().stage).toBe("complete");
+
+    // Assert final traffic weight is 100%
+    _expect(rolloutService.isEnabled("canary_release", { userId: "any_user", tier: "free" })).toBe(true);
+  });
+
+  _it("manual override bypasses automated error threshold triggers", async () => {
+    // Create canary with autoRollback disabled to simulate manual control
+    const manualSvc = new CanaryDeploymentService({
+      weight: 10,
+      bakeTimeMs: 60_000,
+      errorRateThreshold: 5,
+      latencyThresholdMs: 2_000,
+      autoRollback: false,
+    });
+
+    await manualSvc.start("v2", "v1");
+
+    // High error rate should NOT auto-rollback when autoRollback is false
+    await manualSvc.evaluateMetrics({ ...healthy(), errorRate: 99 });
+    _expect(manualSvc.getState().stage).toBe("observing");
+
+    // Manual override: explicitly trigger rollback
+    await manualSvc.rollback("manual override by operator");
+
+    const state = manualSvc.getState();
+    _expect(state.stage).toBe("rolled_back");
+    _expect(state.rollbackReason).toBe("manual override by operator");
+
+    // Emit rollout.rolledBack event for the manual override
+    const events: Array<{ reason: string }> = [];
+    bus.subscribe("rollout.rolledBack", (event) => {
+      events.push(event.payload as { reason: string });
+    });
+    await bus.publish("rollout.rolledBack", { reason: state.rollbackReason });
+    _expect(events[0].reason).toBe("manual override by operator");
+
+    // Traffic weight set to 0% after manual override
+    rolloutService.register({ key: "canary_release", rolloutPercentage: 0 });
+    _expect(rolloutService.isEnabled("canary_release", { userId: "any_user", tier: "free" })).toBe(false);
+  });
+});
