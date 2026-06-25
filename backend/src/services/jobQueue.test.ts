@@ -311,4 +311,191 @@ describe("JobQueue", () => {
       expect(() => q.enqueue("size.ok", payload)).not.toThrow();
     });
   });
+
+  // ── failedJobs ────────────────────────────────────────────────────────────
+
+  describe("failedJobs", () => {
+    async function seedDeadJob(type: string, errorMsg = "boom"): Promise<void> {
+      q.register(type, async () => { throw new Error(errorMsg); });
+      q.enqueue(type, {}, { maxRetries: 1 });
+      await flush(20);   // attempt 1
+      await flush(600);  // attempt 2 (back-off ~500ms)
+      await flush(20);   // settle
+    }
+
+    it("returns all dead-letter jobs when no filters given", async () => {
+      await seedDeadJob("fj.all");
+      const jobs = q.failedJobs();
+      expect(jobs.length).toBeGreaterThanOrEqual(1);
+      expect(jobs.every((j) => j.status === "dead")).toBe(true);
+    }, 5_000);
+
+    it("filters by jobType", async () => {
+      await seedDeadJob("fj.type.a");
+      await seedDeadJob("fj.type.b");
+
+      const jobs = q.failedJobs({ jobType: "fj.type.a" });
+      expect(jobs.length).toBeGreaterThanOrEqual(1);
+      expect(jobs.every((j) => j.type === "fj.type.a")).toBe(true);
+    }, 10_000);
+
+    it("filters by errorCode substring", async () => {
+      await seedDeadJob("fj.err.match", "unique-error-xyz");
+      await seedDeadJob("fj.err.nomatch", "something-else");
+
+      const jobs = q.failedJobs({ errorCode: "unique-error-xyz" });
+      expect(jobs.length).toBeGreaterThanOrEqual(1);
+      expect(jobs.every((j) => j.error?.includes("unique-error-xyz"))).toBe(true);
+    }, 10_000);
+
+    it("filters by startDate", async () => {
+      const before = new Date();
+      await seedDeadJob("fj.date.start");
+      const after = new Date();
+
+      const withStart = q.failedJobs({ startDate: before });
+      const withFuture = q.failedJobs({ startDate: after });
+
+      expect(withStart.some((j) => j.type === "fj.date.start")).toBe(true);
+      expect(withFuture.some((j) => j.type === "fj.date.start")).toBe(false);
+    }, 5_000);
+
+    it("filters by endDate", async () => {
+      await seedDeadJob("fj.date.end");
+      const now = new Date();
+      const past = new Date(Date.now() - 60_000);
+
+      const withinRange = q.failedJobs({ endDate: now });
+      const beforeRange = q.failedJobs({ endDate: past });
+
+      expect(withinRange.some((j) => j.type === "fj.date.end")).toBe(true);
+      expect(beforeRange.some((j) => j.type === "fj.date.end")).toBe(false);
+    }, 5_000);
+
+    it("returns empty array when no jobs match filters", async () => {
+      const jobs = q.failedJobs({ jobType: "nonexistent.type.xyz" });
+      expect(jobs).toEqual([]);
+    });
+  });
+
+  // ── retryJob ──────────────────────────────────────────────────────────────
+
+  describe("retryJob", () => {
+    it("returns null for unknown job id", () => {
+      expect(q.retryJob("nonexistent-id")).toBeNull();
+    });
+
+    it("removes the job from dead-letter and re-enqueues it", async () => {
+      let calls = 0;
+      q.register("retry.dl", async () => {
+        calls++;
+        if (calls === 1) throw new Error("fail first");
+        // succeed on retry
+      });
+
+      q.enqueue("retry.dl", {}, { maxRetries: 1 });
+      await flush(20);   // attempt 1 fails
+      await flush(600);  // attempt 2 fails → goes dead
+      await flush(20);
+
+      const dead = q.deadLetterJobs();
+      const deadJob = dead.find((j) => j.type === "retry.dl");
+      expect(deadJob).toBeDefined();
+
+      const requeued = q.retryJob(deadJob!.id);
+      expect(requeued).not.toBeNull();
+      expect(requeued!.status).toBe("pending");
+      expect(requeued!.attempts).toBe(0);
+
+      // No longer in dead-letter
+      expect(q.deadLetterJobs().find((j) => j.id === deadJob!.id)).toBeUndefined();
+    }, 5_000);
+
+    it("re-enqueued job eventually completes", async () => {
+      let calls = 0;
+      // Fail only on the first call; succeed on any subsequent call.
+      q.register("retry.complete", async () => {
+        calls++;
+        if (calls === 1) throw new Error("first call fails");
+        // calls >= 2: succeed
+      });
+
+      // maxRetries=1 means 1 attempt total before going dead (attempts >= maxRetries)
+      q.enqueue("retry.complete", {}, { maxRetries: 1 });
+      await flush(20);   // attempt 1 fails → dead (attempts === maxRetries)
+      await flush(20);   // settle
+
+      const deadJob = q.deadLetterJobs().find((j) => j.type === "retry.complete");
+      expect(deadJob).toBeDefined();
+
+      // Retry resets attempts to 0, so maxRetries=1 allows one fresh attempt
+      q.retryJob(deadJob!.id);
+      await flush(50);   // the re-queued job runs and succeeds
+
+      expect(calls).toBeGreaterThanOrEqual(2);
+      expect(q.deadLetterJobs().find((j) => j.id === deadJob!.id)).toBeUndefined();
+    }, 5_000);
+
+    it("elevates the job priority to at least 10", async () => {
+      q.register("retry.prio", async () => { throw new Error("fail"); });
+      q.enqueue("retry.prio", {}, { maxRetries: 1 });
+
+      await flush(20);
+      await flush(600);
+      await flush(20);
+
+      const deadJob = q.deadLetterJobs().find((j) => j.type === "retry.prio");
+      const requeued = q.retryJob(deadJob!.id);
+      expect(requeued!.priority).toBeGreaterThanOrEqual(10);
+    }, 5_000);
+  });
+
+  // ── discardJob ────────────────────────────────────────────────────────────
+
+  describe("discardJob", () => {
+    it("returns false for unknown job id", () => {
+      expect(q.discardJob("nonexistent-id")).toBe(false);
+    });
+
+    it("removes the job from dead-letter and returns true", async () => {
+      q.register("discard.dl", async () => { throw new Error("fail"); });
+      q.enqueue("discard.dl", {}, { maxRetries: 1 });
+
+      await flush(20);
+      await flush(600);
+      await flush(20);
+
+      const dead = q.deadLetterJobs();
+      const deadJob = dead.find((j) => j.type === "discard.dl");
+      expect(deadJob).toBeDefined();
+
+      const result = q.discardJob(deadJob!.id);
+      expect(result).toBe(true);
+      expect(q.deadLetterJobs().find((j) => j.id === deadJob!.id)).toBeUndefined();
+    }, 5_000);
+
+    it("does not affect other jobs in the dead-letter list", async () => {
+      q.register("discard.keep", async () => { throw new Error("fail"); });
+      q.register("discard.remove", async () => { throw new Error("fail"); });
+
+      q.enqueue("discard.keep", {}, { maxRetries: 1 });
+      q.enqueue("discard.remove", {}, { maxRetries: 1 });
+
+      await flush(20);
+      await flush(600);
+      await flush(20);
+
+      const before = q.deadLetterJobs();
+      const toRemove = before.find((j) => j.type === "discard.remove");
+      const toKeep = before.find((j) => j.type === "discard.keep");
+      expect(toRemove).toBeDefined();
+      expect(toKeep).toBeDefined();
+
+      q.discardJob(toRemove!.id);
+
+      const after = q.deadLetterJobs();
+      expect(after.find((j) => j.id === toRemove!.id)).toBeUndefined();
+      expect(after.find((j) => j.id === toKeep!.id)).toBeDefined();
+    }, 5_000);
+  });
 });
