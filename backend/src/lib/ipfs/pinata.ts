@@ -1,14 +1,7 @@
 import pinataSDK from "@pinata/sdk";
 import NodeCache from "node-cache";
-import { Counter } from "prom-client";
-import { CircuitBreaker } from "../circuitBreaker.js";
-import { register } from "../metrics/index.js";
-import {
-  verifyCIDContent,
-  verifyMetadataCID,
-  verifyRetrievedContent,
-  CIDMismatchError,
-} from "./cidVerification.js";
+import { CircuitBreaker, registerCircuitBreaker } from "../circuitBreaker.js";
+import { verifyCIDContent, verifyMetadataCID } from "./cidVerification.js";
 import { pinataQueue, type PinataQueueMetrics } from "./pinataQueue.js";
 import { gatewayRouter } from "./gatewayRouter.js";
 
@@ -19,6 +12,10 @@ const ipfsCircuitBreaker = new CircuitBreaker({
   successThreshold: 2,
   timeoutMs: 30000, // 30 seconds before retry
 });
+// Retry-with-backoff for transient (429/5xx) failures is handled by
+// `pinataQueue` itself; this breaker just protects against sustained outages.
+// Registered here so its state is visible via GET /health/detailed.
+registerCircuitBreaker("pinata", ipfsCircuitBreaker);
 
 const PINATA_BASE_URL = "https://api.pinata.cloud";
 const CREDENTIAL_VALIDATION_TIMEOUT_MS = 10000;
@@ -205,19 +202,6 @@ export async function uploadMetadataToIPFS(metadata: any): Promise<string> {
     })
   );
 }
-
-// ---------------------------------------------------------------------------
-// Retrieval with integrity verification
-// ---------------------------------------------------------------------------
-
-// Set IPFS_VERIFY_RETRIEVAL=true to enable CID integrity checks on every fetch.
-const CID_VERIFY_RETRIEVAL_ENABLED =
-  process.env.IPFS_VERIFY_RETRIEVAL !== "false"; // on by default
-
-/**
- * Track CIDs currently undergoing re-pin so callers get 503 until complete.
- */
-const rePinInProgress = new Set<string>();
 
 export async function getMetadataFromIPFS(cid: string): Promise<any> {
   // Check cache first
