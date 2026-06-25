@@ -824,6 +824,32 @@ pub fn set_timelock_config(env: &Env, config: &crate::types::TimelockConfig) {
         .set(&DataKey::TimelockConfig, config);
 }
 
+// ── Per-type timelock delay storage ───────────────────────
+
+/// Default per-type delays (in ledgers).
+const DEFAULT_FEE_CHANGE_DELAY: u64 = 100;
+const DEFAULT_ADMIN_TRANSFER_DELAY: u64 = 1_000;
+const DEFAULT_UPGRADE_DELAY: u64 = 5_000;
+const DEFAULT_PAUSE_DELAY: u64 = 100;
+
+pub fn get_timelock_delay_config(env: &Env) -> crate::types::TimelockDelayConfig {
+    env.storage()
+        .instance()
+        .get(&DataKey::TimelockDelayConfig)
+        .unwrap_or(crate::types::TimelockDelayConfig {
+            fee_change_delay: DEFAULT_FEE_CHANGE_DELAY,
+            admin_transfer_delay: DEFAULT_ADMIN_TRANSFER_DELAY,
+            upgrade_delay: DEFAULT_UPGRADE_DELAY,
+            default_delay: DEFAULT_PAUSE_DELAY,
+        })
+}
+
+pub fn set_timelock_delay_config(env: &Env, config: &crate::types::TimelockDelayConfig) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TimelockDelayConfig, config);
+}
+
 pub fn get_next_change_id(env: &Env) -> Result<u64, Error> {
     let id = env
         .storage()

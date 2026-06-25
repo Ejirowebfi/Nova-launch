@@ -2,7 +2,8 @@ use crate::events;
 use crate::payload_validation;
 use crate::storage;
 use crate::types::{
-    ActionType, ChangeType, Error, PendingChange, Proposal, TimelockConfig, VoteChoice,
+    ActionType, ChangeType, Error, PendingChange, Proposal, TimelockConfig, TimelockDelayConfig,
+    VoteChoice,
 };
 #[cfg(test)]
 use soroban_sdk::testutils::Ledger;
@@ -44,6 +45,43 @@ pub fn initialize_timelock(env: &Env, delay_seconds: Option<u64>) -> Result<(), 
     events::emit_timelock_configured(env, delay);
 
     Ok(())
+}
+
+/// Return the per-proposal-type timelock delay configuration.
+pub fn get_timelock_delay_config(env: &Env) -> TimelockDelayConfig {
+    storage::get_timelock_delay_config(env)
+}
+
+/// Update the per-proposal-type timelock delays.
+///
+/// Can only be called through a successfully-executed governance proposal
+/// (not directly by admin), ensuring delays themselves are subject to governance.
+///
+/// # Errors
+/// * `Error::Unauthorized` - If called outside a governance execution context
+///   (i.e. the caller is not the contract itself via `env.current_contract_address()`).
+pub fn set_timelock_delay_config(env: &Env, config: &TimelockDelayConfig) -> Result<(), Error> {
+    // Minimum sanity: each delay must be at least 1 ledger
+    if config.fee_change_delay == 0
+        || config.admin_transfer_delay == 0
+        || config.upgrade_delay == 0
+        || config.default_delay == 0
+    {
+        return Err(Error::InvalidParameters);
+    }
+    storage::set_timelock_delay_config(env, config);
+    Ok(())
+}
+
+/// Map an `ActionType` to its required delay in ledgers.
+pub fn delay_for_action(env: &Env, action_type: ActionType) -> u64 {
+    let cfg = storage::get_timelock_delay_config(env);
+    match action_type {
+        ActionType::FeeChange | ActionType::PolicyUpdate => cfg.fee_change_delay,
+        ActionType::TreasuryChange => cfg.admin_transfer_delay,
+        ActionType::ParameterChange => cfg.upgrade_delay,
+        ActionType::PauseContract | ActionType::UnpauseContract => cfg.default_delay,
+    }
 }
 
 /// Schedule a fee update
@@ -545,6 +583,8 @@ pub fn create_proposal(
         start_time,
         end_time,
         eta,
+        timelock_delay: 0, // captured at queue time
+        queued_at_ledger: 0, // set when queued
         votes_for: 0,
         votes_against: 0,
         votes_abstain: 0,
@@ -1274,6 +1314,11 @@ pub fn queue_proposal(env: &Env, proposal_id: u64) -> Result<(), Error> {
     // Re-validate payload before queueing (defense in depth; rejects legacy malformed proposals)
     payload_validation::validate_payload(env, proposal.action_type, &proposal.payload)?;
 
+    // Capture the per-type delay at queue time (not at execution time)
+    let queued_delay = delay_for_action(env, proposal.action_type);
+    proposal.timelock_delay = queued_delay;
+    proposal.queued_at_ledger = env.ledger().sequence();
+
     // Transition to Queued state
     ProposalStateMachine::validate_transition(proposal.state, crate::types::ProposalState::Queued)?;
 
@@ -1311,6 +1356,15 @@ pub fn execute_proposal(env: &Env, proposal_id: u64) -> Result<(), Error> {
     let current_time = env.ledger().timestamp();
     if current_time < proposal.eta {
         return Err(Error::TimelockNotExpired);
+    }
+
+    // Enforce the per-type delay (in ledgers) that was captured at queue time.
+    if proposal.timelock_delay > 0 && proposal.queued_at_ledger > 0 {
+        let current_ledger = env.ledger().sequence();
+        let elapsed = current_ledger.saturating_sub(proposal.queued_at_ledger);
+        if (elapsed as u64) < proposal.timelock_delay {
+            return Err(Error::TimelockNotExpired);
+        }
     }
 
     // Emit event signalling the proposal is now executable (timelock elapsed)

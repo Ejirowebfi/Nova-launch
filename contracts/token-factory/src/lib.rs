@@ -120,6 +120,9 @@ mod cross_contract_auth_test;
 mod governance_quorum_test;
 
 #[cfg(test)]
+mod governance_timelock_per_type_test;
+
+#[cfg(test)]
 mod multisig_test;
 
 // #[cfg(test)]

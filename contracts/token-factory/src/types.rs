@@ -178,6 +178,24 @@ pub struct TimelockConfig {
     pub enabled: bool,
 }
 
+/// Per-proposal-type timelock delays (in ledgers).
+///
+/// Each field holds the mandatory delay for that proposal type.
+/// Defaults: fee_change = 100, admin_transfer = 1000, upgrade = 5000.
+/// All other types fall back to `default_delay`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockDelayConfig {
+    /// Delay for FeeChange / PolicyUpdate proposals (ledgers)
+    pub fee_change_delay: u64,
+    /// Delay for TreasuryChange / admin-transfer proposals (ledgers)
+    pub admin_transfer_delay: u64,
+    /// Delay for ParameterChange (contract upgrade) proposals (ledgers)
+    pub upgrade_delay: u64,
+    /// Fallback delay for PauseContract / UnpauseContract (ledgers)
+    pub default_delay: u64,
+}
+
 /// Governance configuration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -624,6 +642,7 @@ pub enum DataKey {
     TokenByAddress(Address),
     Paused,
     TimelockConfig,
+    TimelockDelayConfig,
     PendingChange(u64),
     NextChangeId,
     CreatorTokens(Address),
@@ -1145,6 +1164,12 @@ pub struct Proposal {
     pub start_time: u64,
     pub end_time: u64,
     pub eta: u64,
+    /// Timelock delay (in ledgers) captured at queue time for this proposal type.
+    /// Execution is blocked until `queued_at_ledger + timelock_delay` ledgers have passed.
+    pub timelock_delay: u64,
+    /// Ledger sequence number when the proposal was queued (set by `queue_proposal`).
+    /// Zero when the proposal has not yet been queued.
+    pub queued_at_ledger: u32,
     pub votes_for: i128,
     pub votes_against: i128,
     pub votes_abstain: i128,
