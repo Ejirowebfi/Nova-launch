@@ -44,11 +44,15 @@ export interface UseCampaignStepSubscriptionOptions {
   WebSocketImpl?: typeof WebSocket;
   /** Reconnect backoff in ms — default 2000. */
   reconnectDelayMs?: number;
+  /** Override the REST base URL for catchup calls — primarily for tests. */
+  restBaseUrl?: string;
 }
 
 export interface UseCampaignStepSubscriptionReturn {
   /** True once the connection_ack handshake has completed. */
   connected: boolean;
+  /** True when the server signalled truncation and a full refresh is needed. */
+  needsFullRefresh: boolean;
 }
 
 const SUBSCRIPTION_QUERY = /* GraphQL */ `
@@ -83,15 +87,18 @@ export function useCampaignStepSubscription({
   wsUrl,
   WebSocketImpl,
   reconnectDelayMs = 2_000,
+  restBaseUrl,
 }: UseCampaignStepSubscriptionOptions): UseCampaignStepSubscriptionReturn {
   const [connected, setConnected] = useState(false);
+  const [needsFullRefresh, setNeedsFullRefresh] = useState(false);
 
-  // Stable refs so the socket's event handlers always see the latest callback
-  // / props without having to tear down and reconnect on every render.
   const onStepExecutedRef = useRef(onStepExecuted);
   onStepExecutedRef.current = onStepExecuted;
   const authTokenRef = useRef(authToken);
   authTokenRef.current = authToken;
+
+  /** Last received event sequence number — persists across reconnects. */
+  const lastSequenceRef = useRef<number>(0);
 
   useEffect(() => {
     if (campaignId === null) {
@@ -106,6 +113,42 @@ export function useCampaignStepSubscription({
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
+
+    /** Fetch missed events via REST catchup then resume live subscription. */
+    async function runCatchup(): Promise<void> {
+      const since = lastSequenceRef.current;
+      if (since === 0) return; // first connect — no catchup needed
+
+      const base = restBaseUrl ?? (typeof import.meta !== 'undefined'
+        ? ((import.meta as any)?.env?.VITE_API_BASE_URL ?? '')
+        : '');
+
+      try {
+        const res = await fetch(`${base}/api/events/catchup?since=${since}`);
+        if (!res.ok) return;
+        const body: {
+          truncated: boolean;
+          currentSequence?: number;
+          events?: Array<{ payload?: { campaignStepExecuted?: CampaignStepExecutedEvent }; sequence?: number }>;
+        } = await res.json();
+
+        if (body.truncated) {
+          setNeedsFullRefresh(true);
+          return;
+        }
+
+        for (const ev of body.events ?? []) {
+          const data = ev.payload as any;
+          // The event payload may be the raw step event or wrapped under campaignStepExecuted
+          const step: CampaignStepExecutedEvent | undefined =
+            data?.campaignStepExecuted ?? (data?.campaignId !== undefined ? data : undefined);
+          if (step) onStepExecutedRef.current(step);
+          if (ev.sequence != null) lastSequenceRef.current = ev.sequence;
+        }
+      } catch {
+        // Non-fatal — live events will cover any remaining gap
+      }
+    }
 
     function connect() {
       socket = new Impl(url, 'graphql-transport-ws');
@@ -129,25 +172,31 @@ export function useCampaignStepSubscription({
 
         switch (message.type) {
           case 'connection_ack':
-            setConnected(true);
-            socket?.send(
-              JSON.stringify({
-                id: subscriptionId,
-                type: 'subscribe',
-                payload: {
-                  query: SUBSCRIPTION_QUERY,
-                  variables: { campaignId },
-                },
-              })
-            );
+            // Run catchup before marking connected so callers see events in order
+            void runCatchup().then(() => {
+              setConnected(true);
+              socket?.send(
+                JSON.stringify({
+                  id: subscriptionId,
+                  type: 'subscribe',
+                  payload: {
+                    query: SUBSCRIPTION_QUERY,
+                    variables: { campaignId },
+                  },
+                })
+              );
+            });
             break;
           case 'next': {
             const data = (
               message.payload as {
-                data?: { campaignStepExecuted?: CampaignStepExecutedEvent };
+                data?: { campaignStepExecuted?: CampaignStepExecutedEvent & { sequence?: number } };
               }
             )?.data?.campaignStepExecuted;
-            if (data) onStepExecutedRef.current(data);
+            if (data) {
+              if (data.sequence != null) lastSequenceRef.current = data.sequence;
+              onStepExecutedRef.current(data);
+            }
             break;
           }
           case 'ping':
@@ -186,7 +235,7 @@ export function useCampaignStepSubscription({
         socket.close();
       }
     };
-  }, [campaignId, wsUrl, WebSocketImpl, reconnectDelayMs]);
+  }, [campaignId, wsUrl, WebSocketImpl, reconnectDelayMs, restBaseUrl]);
 
-  return { connected };
+  return { connected, needsFullRefresh };
 }
