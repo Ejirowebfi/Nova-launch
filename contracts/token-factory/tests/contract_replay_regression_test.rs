@@ -358,481 +358,545 @@ fn test_cancel_then_claim_replay_no_state_drift() {
 }
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Vault Deposit Replay Tests
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
+// REPLAY REGRESSION TESTS: VAULT DEPOSIT
+// =============================================================================
 //
-// Design: vault deposit (fund_vault) is IDEMPOTENT-ADDITIVE, not replay-protected.
-// Multiple deposits from the same funder with the same amount are valid and each
-// increases the vault balance independently. Replay protection applies at a higher
-// level (sequence numbers / nonces in the Stellar transaction layer). Within the
-// contract, a deposit after a vault is cancelled or fully-claimed MUST be rejected
-// via `Error::InvalidParameters`, protecting against stale-state replays.
+// fund_vault is IDEMPOTENT: calling it twice with valid parameters accumulates
+// the deposited amount — each call is a legitimate new deposit. There is no
+// "already deposited" guard because adding more funds is valid.
+//
+// claim_vault is REPLAY-PROTECTED: once all funds are claimed the vault is
+// marked as fully claimed. A second claim attempt must return
+// Error::VaultAlreadyClaimed (code 62), never silently succeed or panic.
 
-#[derive(Clone, PartialEq, Debug)]
-enum VaultStatus { Active, Claimed, Cancelled }
+#[derive(Debug, PartialEq, Clone)]
+enum VaultStatus { Active, Claimed, Locked, Cancelled }
 
 #[derive(Clone)]
-struct VaultRecord {
-    owner: Address,
-    funder: Address,
-    total_deposited: i128,
-    unlock_time: u64,
-    status: VaultStatus,
+struct VaultState {
+    owner:          Address,
+    total_amount:   i128,
+    claimed_amount: i128,
+    unlock_time:    u64,
+    status:         VaultStatus,
 }
+
+use std::cell::RefCell;
 
 thread_local! {
-    static VAULTS: std::cell::RefCell<std::collections::HashMap<u64, VaultRecord>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static VAULTS: RefCell<std::collections::HashMap<u64, VaultState>> =
+        RefCell::new(std::collections::HashMap::new());
+    static VOTES: RefCell<std::collections::HashMap<(u64, String), bool>> =
+        RefCell::new(std::collections::HashMap::new());
+    static CAMPAIGNS: RefCell<std::collections::HashMap<u64, CampaignState>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
-fn reset_vaults() { VAULTS.with(|v| v.borrow_mut().clear()); }
-fn set_vault(id: u64, v: VaultRecord) { VAULTS.with(|m| { m.borrow_mut().insert(id, v); }); }
-fn get_vault(id: u64) -> Option<VaultRecord> { VAULTS.with(|m| m.borrow().get(&id).cloned()) }
+#[derive(Debug, PartialEq, Clone)]
+enum VaultError {
+    TokenNotFound, Unauthorized, InvalidAmount, InvalidParameters,
+    VaultLocked, VaultAlreadyClaimed, NothingToClaim,
+}
 
-fn deposit_vault(vault_id: u64, funder: &Address, amount: i128) -> Result<i128, Error> {
-    if amount <= 0 { return Err(Error::InvalidParameters); }
-    let mut v = get_vault(vault_id).ok_or(Error::TokenNotFound)?;
+fn vault_reset() {
+    VAULTS.with(|v| v.borrow_mut().clear());
+}
+fn vault_set(id: u64, s: VaultState) {
+    VAULTS.with(|v| { v.borrow_mut().insert(id, s); });
+}
+fn vault_get(id: u64) -> Option<VaultState> {
+    VAULTS.with(|v| v.borrow().get(&id).cloned())
+}
+
+/// Simulate fund_vault: IDEMPOTENT — accumulates on repeat calls.
+fn sim_fund_vault(vault_id: u64, caller: &Address, amount: i128) -> Result<(), VaultError> {
+    if amount <= 0 { return Err(VaultError::InvalidAmount); }
+    let mut v = vault_get(vault_id).ok_or(VaultError::TokenNotFound)?;
+    if v.status != VaultStatus::Active { return Err(VaultError::InvalidParameters); }
+    v.total_amount = v.total_amount.checked_add(amount).ok_or(VaultError::InvalidAmount)?;
+    vault_set(vault_id, v);
+    Ok(())
+}
+
+/// Simulate claim_vault: REPLAY-PROTECTED via VaultAlreadyClaimed.
+fn sim_claim_vault(env: &Env, vault_id: u64, caller: &Address) -> Result<i128, VaultError> {
+    let mut v = vault_get(vault_id).ok_or(VaultError::TokenNotFound)?;
+    if v.owner != *caller { return Err(VaultError::Unauthorized); }
     match v.status {
-        VaultStatus::Active => {}
-        _ => return Err(Error::InvalidParameters),
+        VaultStatus::Claimed    => return Err(VaultError::VaultAlreadyClaimed),
+        VaultStatus::Locked     => return Err(VaultError::VaultLocked),
+        VaultStatus::Cancelled  => return Err(VaultError::InvalidParameters),
+        VaultStatus::Active     => {}
     }
-    v.total_deposited = v.total_deposited.checked_add(amount).ok_or(Error::InvalidParameters)?;
-    let new_total = v.total_deposited;
-    set_vault(vault_id, v);
-    let _ = funder; // auth checked by runtime in production
-    Ok(new_total)
+    if env.ledger().timestamp() < v.unlock_time { return Err(VaultError::VaultLocked); }
+    let claimable = v.total_amount - v.claimed_amount;
+    if claimable <= 0 { return Err(VaultError::NothingToClaim); }
+    v.claimed_amount += claimable;
+    v.status = VaultStatus::Claimed;
+    vault_set(vault_id, v);
+    Ok(claimable)
 }
 
-fn cancel_vault(vault_id: u64, caller: &Address) -> Result<(), Error> {
-    let mut v = get_vault(vault_id).ok_or(Error::TokenNotFound)?;
-    if v.owner != *caller { return Err(Error::Unauthorized); }
-    if v.status != VaultStatus::Active { return Err(Error::InvalidParameters); }
-    v.status = VaultStatus::Cancelled;
-    set_vault(vault_id, v);
-    Ok(())
-}
-
-fn make_vault_fixture(env: &Env) -> (u64, Address, Address) {
-    reset_vaults();
-    reset_state();
-    let owner  = Address::generate(env);
-    let funder = Address::generate(env);
-    set_vault(42, VaultRecord {
-        owner: owner.clone(), funder: funder.clone(),
-        total_deposited: 0, unlock_time: 9_999_999_999, status: VaultStatus::Active,
+fn make_vault_fixture(env: &Env) -> (u64, Address) {
+    vault_reset();
+    let owner = Address::generate(env);
+    vault_set(0, VaultState {
+        owner: owner.clone(), total_amount: 5_000, claimed_amount: 0,
+        unlock_time: 100, status: VaultStatus::Active,
     });
-    (42, owner, funder)
+    (0, owner)
 }
 
-/// vault deposit is idempotent-additive: repeated identical deposits each succeed
-/// and each independently increment the balance (no single-use nonce at this layer).
+/// fund_vault is IDEMPOTENT: a second call with the same parameters is valid
+/// and adds more funds to the vault total.
 #[test]
-fn test_vault_deposit_replay_protection_idempotent_additive() {
+fn replay_protection_vault_deposit_is_idempotent() {
     let env = make_env();
-    let (vid, _owner, funder) = make_vault_fixture(&env);
+    let (vid, _owner) = make_vault_fixture(&env);
+    let funder = Address::generate(&env);
 
-    let after_first  = deposit_vault(vid, &funder, 1_000).unwrap();
-    let after_second = deposit_vault(vid, &funder, 1_000).unwrap();
+    // First deposit succeeds
+    sim_fund_vault(vid, &funder, 1_000).expect("first deposit must succeed");
+    let after_first = vault_get(vid).unwrap().total_amount;
 
-    // Both succeed; each increments the total
-    assert_eq!(after_first,  1_000);
-    assert_eq!(after_second, 2_000);
-    assert_eq!(get_vault(vid).unwrap().total_deposited, 2_000);
+    // Second deposit with identical parameters also succeeds — it accumulates
+    sim_fund_vault(vid, &funder, 1_000).expect("second deposit must also succeed (idempotent add)");
+    let after_second = vault_get(vid).unwrap().total_amount;
+
+    // Total should be initial + both deposits
+    assert_eq!(after_first,  6_000, "total after first deposit");
+    assert_eq!(after_second, 7_000, "total after second deposit accumulates correctly");
 }
 
-/// a deposit replayed against a CANCELLED vault must be rejected with InvalidParameters
-/// (stale-state replay protection).
+/// claim_vault is REPLAY-PROTECTED: after a full claim the vault is sealed
+/// and every subsequent call must return VaultAlreadyClaimed, not panic.
 #[test]
-fn test_vault_deposit_replay_on_cancelled_fails() {
+fn replay_protection_vault_claim_after_full_claim_returns_already_claimed() {
     let env = make_env();
-    let (vid, owner, funder) = make_vault_fixture(&env);
+    let (vid, owner) = make_vault_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 200);
 
-    deposit_vault(vid, &funder, 500).unwrap();
-    cancel_vault(vid, &owner).unwrap();
+    let claimed = sim_claim_vault(&env, vid, &owner).expect("first claim must succeed");
+    assert_eq!(claimed, 5_000);
+    assert_eq!(vault_get(vid).unwrap().status, VaultStatus::Claimed);
 
-    // Replaying the identical deposit now hits the cancelled guard
-    let result = deposit_vault(vid, &funder, 500);
-    assert_eq!(result, Err(Error::InvalidParameters));
+    // Replay — must return the specific VaultAlreadyClaimed error, never panic
+    assert_eq!(
+        sim_claim_vault(&env, vid, &owner),
+        Err(VaultError::VaultAlreadyClaimed),
+        "second claim must return VaultAlreadyClaimed"
+    );
 }
 
-/// repeated cancellation attempts are idempotent-failing after the first success.
+/// Multiple replay attempts must all consistently return VaultAlreadyClaimed.
 #[test]
-fn test_vault_cancel_replay_fails() {
+fn replay_protection_vault_claim_replay_is_deterministic() {
     let env = make_env();
-    let (vid, owner, _funder) = make_vault_fixture(&env);
+    let (vid, owner) = make_vault_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 200);
 
-    cancel_vault(vid, &owner).unwrap();
-    for i in 0..3 {
-        assert_eq!(cancel_vault(vid, &owner), Err(Error::InvalidParameters),
-                   "cancel replay #{}", i + 1);
-    }
-    assert_eq!(get_vault(vid).unwrap().status, VaultStatus::Cancelled);
-}
-
-/// zero-amount deposit is always rejected — prevents trivially replayed no-ops
-/// that could pollute event logs or inflate sequence state.
-#[test]
-fn test_vault_deposit_zero_amount_rejected() {
-    let env = make_env();
-    let (vid, _owner, funder) = make_vault_fixture(&env);
-
-    for _ in 0..3 {
-        assert_eq!(deposit_vault(vid, &funder, 0), Err(Error::InvalidParameters));
-    }
-    assert_eq!(get_vault(vid).unwrap().total_deposited, 0);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Governance Vote Replay Tests
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Design: governance voting is REPLAY-PROTECTED. Each address may cast exactly
-// one vote per proposal. A second identical call MUST return `Error::AlreadyVoted`
-// (code 47) and MUST NOT alter the vote tallies recorded by the first call.
-
-#[derive(Clone, PartialEq, Debug)]
-enum VoteChoice { For, Against, Abstain }
-
-#[derive(Clone, PartialEq, Debug)]
-enum GovProposalState { Active, Ended }
-
-#[derive(Clone)]
-struct GovProposal {
-    state: GovProposalState,
-    start_time: u64,
-    end_time: u64,
-    for_votes: u64,
-    against_votes: u64,
-    abstain_votes: u64,
-}
-
-thread_local! {
-    static GOV_PROPOSALS: std::cell::RefCell<std::collections::HashMap<u64, GovProposal>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    static GOV_VOTES: std::cell::RefCell<std::collections::HashMap<(u64, String), VoteChoice>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-fn reset_gov() {
-    GOV_PROPOSALS.with(|p| p.borrow_mut().clear());
-    GOV_VOTES.with(|v| v.borrow_mut().clear());
-}
-fn set_gov_proposal(id: u64, p: GovProposal) { GOV_PROPOSALS.with(|m| { m.borrow_mut().insert(id, p); }); }
-fn get_gov_proposal(id: u64) -> Option<GovProposal> { GOV_PROPOSALS.with(|m| m.borrow().get(&id).cloned()) }
-fn has_voted_gov(pid: u64, voter: &Address) -> bool {
-    let key = (pid, format!("{:?}", voter));
-    GOV_VOTES.with(|m| m.borrow().contains_key(&key))
-}
-fn record_vote(pid: u64, voter: &Address, choice: VoteChoice) {
-    let key = (pid, format!("{:?}", voter));
-    GOV_VOTES.with(|m| { m.borrow_mut().insert(key, choice); });
-}
-
-fn gov_vote(env: &Env, voter: &Address, pid: u64, choice: VoteChoice) -> Result<(), Error> {
-    let mut p = get_gov_proposal(pid).ok_or(Error::InvalidParameters)?;
-    let now = env.ledger().timestamp();
-    if now < p.start_time { return Err(Error::InvalidParameters); }
-    if now >= p.end_time  { return Err(Error::InvalidParameters); }
-    if p.state != GovProposalState::Active { return Err(Error::InvalidParameters); }
-    if has_voted_gov(pid, voter) { return Err(Error::AlreadyVoted); }
-    match choice {
-        VoteChoice::For     => p.for_votes     += 1,
-        VoteChoice::Against => p.against_votes += 1,
-        VoteChoice::Abstain => p.abstain_votes += 1,
-    }
-    record_vote(pid, voter, choice);
-    set_gov_proposal(pid, p);
-    Ok(())
-}
-
-fn make_gov_fixture(env: &Env) -> u64 {
-    reset_gov();
-    let now = env.ledger().timestamp();
-    set_gov_proposal(99, GovProposal {
-        state: GovProposalState::Active,
-        start_time: now,
-        end_time: now + 86_400,
-        for_votes: 0, against_votes: 0, abstain_votes: 0,
-    });
-    99
-}
-
-/// voting twice with the same choice must return AlreadyVoted on the second call.
-#[test]
-fn test_governance_vote_replay_fails() {
-    let env = make_env();
-    let pid   = make_gov_fixture(&env);
-    let voter = Address::generate(&env);
-
-    gov_vote(&env, &voter, pid, VoteChoice::For).unwrap();
-    assert_eq!(gov_vote(&env, &voter, pid, VoteChoice::For), Err(Error::AlreadyVoted));
-}
-
-/// vote tallies must not change after a replay attempt — state is frozen for that voter.
-#[test]
-fn test_governance_vote_replay_does_not_change_tally() {
-    let env = make_env();
-    let pid   = make_gov_fixture(&env);
-    let voter = Address::generate(&env);
-
-    gov_vote(&env, &voter, pid, VoteChoice::For).unwrap();
-    let snapshot = get_gov_proposal(pid).unwrap().for_votes;
-
+    sim_claim_vault(&env, vid, &owner).unwrap();
     for i in 0..5 {
-        assert_eq!(gov_vote(&env, &voter, pid, VoteChoice::For), Err(Error::AlreadyVoted),
-                   "replay #{}", i + 1);
+        assert_eq!(
+            sim_claim_vault(&env, vid, &owner),
+            Err(VaultError::VaultAlreadyClaimed),
+            "replay #{} must return VaultAlreadyClaimed", i + 1
+        );
     }
-    assert_eq!(get_gov_proposal(pid).unwrap().for_votes, snapshot,
-               "tally must not grow after replays");
+    // State must not drift
+    let v = vault_get(vid).unwrap();
+    assert_eq!(v.claimed_amount, v.total_amount);
 }
 
-/// changing the vote choice on replay must also be rejected (not a vote-change mechanism).
+/// claim_vault before unlock must return VaultLocked (not panic).
 #[test]
-fn test_governance_vote_replay_different_choice_fails() {
+fn replay_protection_vault_claim_before_unlock_returns_locked() {
     let env = make_env();
-    let pid   = make_gov_fixture(&env);
-    let voter = Address::generate(&env);
+    let (vid, owner) = make_vault_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 50); // before unlock_time=100
 
-    gov_vote(&env, &voter, pid, VoteChoice::For).unwrap();
-    // Attempting to switch to Against via a replay must still be rejected
-    assert_eq!(gov_vote(&env, &voter, pid, VoteChoice::Against), Err(Error::AlreadyVoted));
-    // Original for-vote must be intact
-    let p = get_gov_proposal(pid).unwrap();
-    assert_eq!(p.for_votes, 1);
-    assert_eq!(p.against_votes, 0);
+    for i in 0..3 {
+        assert_eq!(
+            sim_claim_vault(&env, vid, &owner),
+            Err(VaultError::VaultLocked),
+            "attempt #{} before unlock must return VaultLocked", i + 1
+        );
+    }
+    // After advancing time it succeeds
+    env.ledger().with_mut(|li| li.timestamp = 200);
+    assert!(sim_claim_vault(&env, vid, &owner).is_ok());
 }
 
-/// two distinct voters may each vote once; replaying voter-1's tx must not affect voter-2.
-#[test]
-fn test_governance_vote_replay_no_cross_voter_pollution() {
-    let env = make_env();
-    let pid    = make_gov_fixture(&env);
-    let voter1 = Address::generate(&env);
-    let voter2 = Address::generate(&env);
-
-    gov_vote(&env, &voter1, pid, VoteChoice::For).unwrap();
-    gov_vote(&env, &voter2, pid, VoteChoice::Against).unwrap();
-
-    // Replaying voter-1
-    assert_eq!(gov_vote(&env, &voter1, pid, VoteChoice::For), Err(Error::AlreadyVoted));
-
-    let p = get_gov_proposal(pid).unwrap();
-    assert_eq!(p.for_votes,     1);
-    assert_eq!(p.against_votes, 1);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Stream Claim Replay Tests
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
+// REPLAY REGRESSION TESTS: GOVERNANCE VOTE
+// =============================================================================
 //
-// The stream-claim logic already exists in the simulation above (claim_stream /
-// make_stream_fixture). The tests below verify replay protection specifically under
-// scenarios not covered by the existing suite: partial-vest replay and mid-stream
-// time-advance replay.
+// cast_vote is REPLAY-PROTECTED: each address may vote at most once per proposal.
+// A second vote attempt with the same address and proposal must return
+// Error::AlreadyVoted (code 46 per error_code_stability_test). The vote totals
+// must not change after the first successful vote.
 
-/// replaying a claim at the exact same timestamp as a successful prior claim must fail
-/// because all vested tokens for that instant were already drawn.
-/// Design: REPLAY-PROTECTED via claimed_amount tracking (no double-accounting).
-#[test]
-fn test_stream_claim_replay_protection_same_amount_rejected() {
-    let env = make_env();
-    let (sid, _, recipient) = make_stream_fixture(&env);
-    env.ledger().with_mut(|li| li.timestamp = 1_200);
-
-    let first = claim_stream(&env, &recipient, sid).unwrap();
-    assert!(first > 0, "first claim must yield tokens");
-
-    // Identical replay at same time: vested == already-claimed, so nothing remains
-    assert_eq!(claim_stream(&env, &recipient, sid), Err(Error::InvalidAmount));
-}
-
-/// replaying after advancing time still respects previously claimed amount;
-/// only the newly-vested increment is available.
-#[test]
-fn test_stream_claim_replay_incremental_no_double_payout() {
-    let env = make_env();
-    let (sid, _, recipient) = make_stream_fixture(&env);
-
-    env.ledger().with_mut(|li| li.timestamp = 1_100);
-    let c1 = claim_stream(&env, &recipient, sid).unwrap(); // 10% vested
-
-    env.ledger().with_mut(|li| li.timestamp = 1_100); // same time
-    // Replay: nothing new has vested
-    assert_eq!(claim_stream(&env, &recipient, sid), Err(Error::InvalidAmount));
-
-    env.ledger().with_mut(|li| li.timestamp = 1_600); // now 60% vested
-    let c2 = claim_stream(&env, &recipient, sid).unwrap();
-
-    // Total claimed must equal exactly vested — no duplication
-    let s = get_stream(sid).unwrap();
-    assert_eq!(c1 + c2, s.claimed_amount);
-    assert!(c2 < s.amount - c1, "c2 must not exceed remaining unvested");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Campaign Execute Replay Tests
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Design: campaign state-changing operations (complete/cancel) are REPLAY-PROTECTED
-// via terminal-state guards. Once a campaign reaches Completed or Cancelled status
-// any repeated call with identical parameters MUST return the appropriate terminal
-// error rather than re-executing. Pause/resume replays are likewise blocked by
-// CampaignAlreadyPaused / CampaignNotPaused guards.
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum CampaignState { Active, Paused, Completed, Cancelled }
+#[derive(Debug, PartialEq, Clone)]
+enum VoteError { ProposalNotFound, AlreadyVoted, Unauthorized, InvalidParameters }
 
 #[derive(Clone)]
-struct Campaign {
-    owner: Address,
-    state: CampaignState,
-    execution_count: u32,
+struct ProposalVoteState {
+    yes_votes: i128,
+    no_votes:  i128,
+    open: bool,
 }
 
 thread_local! {
-    static CAMPAIGNS: std::cell::RefCell<std::collections::HashMap<u64, Campaign>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static GOV_PROPOSALS: RefCell<std::collections::HashMap<u64, ProposalVoteState>> =
+        RefCell::new(std::collections::HashMap::new());
+    static GOV_VOTERS: RefCell<std::collections::HashMap<(u64, String), bool>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
-fn reset_campaigns() { CAMPAIGNS.with(|c| c.borrow_mut().clear()); }
-fn set_campaign(id: u64, c: Campaign) { CAMPAIGNS.with(|m| { m.borrow_mut().insert(id, c); }); }
-fn get_campaign(id: u64) -> Option<Campaign> { CAMPAIGNS.with(|m| m.borrow().get(&id).cloned()) }
-
-fn campaign_execute(id: u64, caller: &Address) -> Result<u32, Error> {
-    let mut c = get_campaign(id).ok_or(Error::InvalidParameters)?;
-    if c.owner != *caller { return Err(Error::Unauthorized); }
-    match c.state {
-        CampaignState::Active  => {}
-        CampaignState::Paused     => return Err(Error::InvalidParameters),
-        CampaignState::Completed  => return Err(Error::AlreadyExecuted),
-        CampaignState::Cancelled  => return Err(Error::ProposalCancelled),
-    }
-    c.execution_count += 1;
-    let count = c.execution_count;
-    set_campaign(id, c);
-    Ok(count)
+fn gov_reset() {
+    GOV_PROPOSALS.with(|p| p.borrow_mut().clear());
+    GOV_VOTERS.with(|v| v.borrow_mut().clear());
+}
+fn gov_set_proposal(id: u64, s: ProposalVoteState) {
+    GOV_PROPOSALS.with(|p| { p.borrow_mut().insert(id, s); });
+}
+fn gov_get_proposal(id: u64) -> Option<ProposalVoteState> {
+    GOV_PROPOSALS.with(|p| p.borrow().get(&id).cloned())
+}
+fn gov_has_voted(proposal_id: u64, voter: &Address) -> bool {
+    let key = (proposal_id, format!("{:?}", voter));
+    GOV_VOTERS.with(|v| v.borrow().contains_key(&key))
+}
+fn gov_record_vote(proposal_id: u64, voter: &Address, support: bool) {
+    let key = (proposal_id, format!("{:?}", voter));
+    GOV_VOTERS.with(|v| { v.borrow_mut().insert(key, support); });
 }
 
-fn campaign_complete(id: u64, caller: &Address) -> Result<(), Error> {
-    let mut c = get_campaign(id).ok_or(Error::InvalidParameters)?;
-    if c.owner != *caller { return Err(Error::Unauthorized); }
-    match c.state {
-        CampaignState::Active  => {}
-        CampaignState::Paused     => return Err(Error::InvalidParameters),
-        CampaignState::Completed  => return Err(Error::AlreadyExecuted),
-        CampaignState::Cancelled  => return Err(Error::ProposalCancelled),
-    }
-    c.state = CampaignState::Completed;
-    set_campaign(id, c);
+/// Simulate cast_vote: REPLAY-PROTECTED via AlreadyVoted.
+fn sim_cast_vote(
+    proposal_id: u64, voter: &Address, support: bool, voting_power: i128,
+) -> Result<(), VoteError> {
+    if voting_power <= 0 { return Err(VoteError::InvalidParameters); }
+    let mut p = gov_get_proposal(proposal_id).ok_or(VoteError::ProposalNotFound)?;
+    if !p.open { return Err(VoteError::InvalidParameters); }
+    if gov_has_voted(proposal_id, voter) { return Err(VoteError::AlreadyVoted); }
+    if support { p.yes_votes += voting_power; } else { p.no_votes += voting_power; }
+    gov_set_proposal(proposal_id, p);
+    gov_record_vote(proposal_id, voter, support);
     Ok(())
 }
 
-fn campaign_cancel(id: u64, caller: &Address) -> Result<(), Error> {
-    let mut c = get_campaign(id).ok_or(Error::InvalidParameters)?;
-    if c.owner != *caller { return Err(Error::Unauthorized); }
-    match c.state {
-        CampaignState::Completed  => return Err(Error::AlreadyExecuted),
-        CampaignState::Cancelled  => return Err(Error::ProposalCancelled),
-        _ => {}
+fn make_gov_fixture() -> u64 {
+    gov_reset();
+    gov_set_proposal(1, ProposalVoteState { yes_votes: 0, no_votes: 0, open: true });
+    1
+}
+
+/// cast_vote is REPLAY-PROTECTED: a second vote by the same address on the same
+/// proposal must return AlreadyVoted and must not change the vote totals.
+#[test]
+fn replay_protection_governance_vote_replay_returns_already_voted() {
+    let env = make_env();
+    let pid = make_gov_fixture();
+    let voter = Address::generate(&env);
+
+    // First vote succeeds
+    sim_cast_vote(pid, &voter, true, 100).expect("first vote must succeed");
+    let after_first = gov_get_proposal(pid).unwrap().yes_votes;
+
+    // Replay — must return AlreadyVoted, not panic or double-count
+    assert_eq!(
+        sim_cast_vote(pid, &voter, true, 100),
+        Err(VoteError::AlreadyVoted),
+        "replay vote must return AlreadyVoted"
+    );
+    assert_eq!(
+        gov_get_proposal(pid).unwrap().yes_votes, after_first,
+        "vote total must not change on replay"
+    );
+}
+
+/// Multiple replay attempts must all consistently return AlreadyVoted.
+#[test]
+fn replay_protection_governance_vote_replay_is_deterministic() {
+    let env = make_env();
+    let pid = make_gov_fixture();
+    let voter = Address::generate(&env);
+
+    sim_cast_vote(pid, &voter, true, 50).unwrap();
+    for i in 0..5 {
+        assert_eq!(
+            sim_cast_vote(pid, &voter, true, 50),
+            Err(VoteError::AlreadyVoted),
+            "replay #{} must return AlreadyVoted", i + 1
+        );
     }
-    c.state = CampaignState::Cancelled;
-    set_campaign(id, c);
+    // Totals must reflect exactly one vote
+    assert_eq!(gov_get_proposal(pid).unwrap().yes_votes, 50);
+}
+
+/// Two different voters each vote once — no cross-address replay.
+#[test]
+fn replay_protection_governance_vote_two_voters_no_cross_replay() {
+    let env = make_env();
+    let pid = make_gov_fixture();
+    let alice = Address::generate(&env);
+    let bob   = Address::generate(&env);
+
+    sim_cast_vote(pid, &alice, true,  100).expect("alice vote 1");
+    sim_cast_vote(pid, &bob,   false, 200).expect("bob vote 1");
+
+    // Both replays individually rejected
+    assert_eq!(sim_cast_vote(pid, &alice, true, 100), Err(VoteError::AlreadyVoted));
+    assert_eq!(sim_cast_vote(pid, &bob,  false, 200), Err(VoteError::AlreadyVoted));
+
+    let p = gov_get_proposal(pid).unwrap();
+    assert_eq!(p.yes_votes, 100);
+    assert_eq!(p.no_votes,  200);
+}
+
+/// Voter switches support on replay — second vote is still rejected.
+#[test]
+fn replay_protection_governance_vote_switch_support_rejected() {
+    let env = make_env();
+    let pid = make_gov_fixture();
+    let voter = Address::generate(&env);
+
+    sim_cast_vote(pid, &voter, true, 100).unwrap();
+
+    // Attempt to switch from yes to no — must be rejected
+    assert_eq!(
+        sim_cast_vote(pid, &voter, false, 100),
+        Err(VoteError::AlreadyVoted),
+        "switching vote support must also be rejected"
+    );
+    // Original yes vote must stand
+    let p = gov_get_proposal(pid).unwrap();
+    assert_eq!(p.yes_votes, 100);
+    assert_eq!(p.no_votes,  0);
+}
+
+// =============================================================================
+// REPLAY REGRESSION TESTS: STREAM CLAIM
+// =============================================================================
+//
+// claim_stream is REPLAY-PROTECTED at-saturation: once the full vested amount
+// has been claimed, subsequent calls must return Error::InvalidAmount (no
+// claimable balance), not panic or over-disburse. This suite specifically
+// validates replay behavior using the `replay_protection_` naming convention
+// for easy `cargo test replay_protection` filtering.
+
+/// Claiming a fully vested stream twice — second call returns error.
+#[test]
+fn replay_protection_stream_claim_full_vested_replay_fails() {
+    let env = make_env();
+    let (sid, _, recipient) = make_stream_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 3_000); // past end_time
+
+    let first = claim_stream(&env, &recipient, sid).expect("first claim must succeed");
+    assert_eq!(first, 10_000, "should claim full amount");
+
+    // Replay at same timestamp
+    assert_eq!(
+        claim_stream(&env, &recipient, sid),
+        Err(Error::InvalidAmount),
+        "replay claim must return InvalidAmount"
+    );
+}
+
+/// Multiple replays are deterministically rejected.
+#[test]
+fn replay_protection_stream_claim_replay_deterministic() {
+    let env = make_env();
+    let (sid, _, recipient) = make_stream_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 3_000);
+
+    claim_stream(&env, &recipient, sid).unwrap();
+    for i in 0..5 {
+        assert_eq!(
+            claim_stream(&env, &recipient, sid),
+            Err(Error::InvalidAmount),
+            "replay #{} must be rejected", i + 1
+        );
+    }
+    let s = get_stream(sid).unwrap();
+    assert_eq!(s.claimed_amount, s.amount, "claimed_amount must equal total after saturation");
+}
+
+/// Replay at the same mid-stream timestamp disburses zero.
+#[test]
+fn replay_protection_stream_claim_mid_stream_same_timestamp_replay_fails() {
+    let env = make_env();
+    let (sid, _, recipient) = make_stream_fixture(&env);
+    env.ledger().with_mut(|li| li.timestamp = 1_500); // 50% through
+
+    let partial = claim_stream(&env, &recipient, sid).expect("partial claim must succeed");
+    assert_eq!(partial, 5_000);
+
+    // Same timestamp replay — nothing new vested
+    assert_eq!(
+        claim_stream(&env, &recipient, sid),
+        Err(Error::InvalidAmount),
+        "second claim at same timestamp must return InvalidAmount"
+    );
+}
+
+// =============================================================================
+// REPLAY REGRESSION TESTS: CAMPAIGN EXECUTE (pause/resume cycle)
+// =============================================================================
+//
+// pause_campaign is REPLAY-PROTECTED: calling it twice on an already-paused
+// campaign must return Error::CampaignAlreadyPaused (code 65), not panic.
+//
+// resume_campaign is similarly REPLAY-PROTECTED: resuming an already-active
+// campaign must return an error (InvalidStateTransition / InvalidParameters),
+// not silently succeed or panic.
+//
+// Together they form the "campaign execute" replay surface: the pair governs
+// campaign state-change idempotency.
+
+#[derive(Debug, PartialEq, Clone)]
+enum CampaignStatus { Active, Paused, Completed, Cancelled }
+
+#[derive(Clone)]
+struct CampaignState {
+    owner:  Address,
+    status: CampaignStatus,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+enum CampaignError {
+    CampaignNotFound, Unauthorized,
+    CampaignAlreadyPaused, CampaignAlreadyActive,
+    CampaignCompleted, CampaignCancelled,
+}
+
+fn camp_reset() { CAMPAIGNS.with(|c| c.borrow_mut().clear()); }
+fn camp_set(id: u64, s: CampaignState) {
+    CAMPAIGNS.with(|c| { c.borrow_mut().insert(id, s); });
+}
+fn camp_get(id: u64) -> Option<CampaignState> {
+    CAMPAIGNS.with(|c| c.borrow().get(&id).cloned())
+}
+
+/// Simulate pause_campaign: REPLAY-PROTECTED via CampaignAlreadyPaused.
+fn sim_pause_campaign(campaign_id: u64, caller: &Address) -> Result<(), CampaignError> {
+    let mut c = camp_get(campaign_id).ok_or(CampaignError::CampaignNotFound)?;
+    if c.owner != *caller { return Err(CampaignError::Unauthorized); }
+    match c.status {
+        CampaignStatus::Active    => { c.status = CampaignStatus::Paused; }
+        CampaignStatus::Paused    => return Err(CampaignError::CampaignAlreadyPaused),
+        CampaignStatus::Completed => return Err(CampaignError::CampaignCompleted),
+        CampaignStatus::Cancelled => return Err(CampaignError::CampaignCancelled),
+    }
+    camp_set(campaign_id, c);
+    Ok(())
+}
+
+/// Simulate resume_campaign: REPLAY-PROTECTED via CampaignAlreadyActive.
+fn sim_resume_campaign(campaign_id: u64, caller: &Address) -> Result<(), CampaignError> {
+    let mut c = camp_get(campaign_id).ok_or(CampaignError::CampaignNotFound)?;
+    if c.owner != *caller { return Err(CampaignError::Unauthorized); }
+    match c.status {
+        CampaignStatus::Paused    => { c.status = CampaignStatus::Active; }
+        CampaignStatus::Active    => return Err(CampaignError::CampaignAlreadyActive),
+        CampaignStatus::Completed => return Err(CampaignError::CampaignCompleted),
+        CampaignStatus::Cancelled => return Err(CampaignError::CampaignCancelled),
+    }
+    camp_set(campaign_id, c);
     Ok(())
 }
 
 fn make_campaign_fixture(env: &Env) -> (u64, Address) {
-    reset_campaigns();
+    camp_reset();
     let owner = Address::generate(env);
-    set_campaign(7, Campaign { owner: owner.clone(), state: CampaignState::Active, execution_count: 0 });
-    (7, owner)
+    camp_set(1, CampaignState { owner: owner.clone(), status: CampaignStatus::Active });
+    (1, owner)
 }
 
-/// executing a campaign step twice is allowed while Active — each call increments
-/// execution_count. Replay protection in production is enforced by the min_interval
-/// guard; here we verify the execution_count monotonically increases.
+/// pause_campaign is REPLAY-PROTECTED: a second pause call must return
+/// CampaignAlreadyPaused and must not modify state.
 #[test]
-fn test_campaign_execute_step_increments_count() {
+fn replay_protection_campaign_execute_pause_replay_returns_already_paused() {
     let env = make_env();
     let (cid, owner) = make_campaign_fixture(&env);
 
-    let c1 = campaign_execute(cid, &owner).unwrap();
-    let c2 = campaign_execute(cid, &owner).unwrap();
+    // First pause succeeds
+    sim_pause_campaign(cid, &owner).expect("first pause must succeed");
+    assert_eq!(camp_get(cid).unwrap().status, CampaignStatus::Paused);
 
-    assert_eq!(c1, 1);
-    assert_eq!(c2, 2);
-    assert_eq!(get_campaign(cid).unwrap().execution_count, 2);
+    // Replay — must return CampaignAlreadyPaused, not panic
+    assert_eq!(
+        sim_pause_campaign(cid, &owner),
+        Err(CampaignError::CampaignAlreadyPaused),
+        "second pause must return CampaignAlreadyPaused"
+    );
+    // State must not change
+    assert_eq!(camp_get(cid).unwrap().status, CampaignStatus::Paused);
 }
 
-/// once a campaign is Completed, any further execute/complete call is
-/// replay-protected and MUST return AlreadyExecuted.
+/// Multiple pause replay attempts must all consistently return CampaignAlreadyPaused.
 #[test]
-fn test_campaign_complete_replay_fails() {
+fn replay_protection_campaign_execute_pause_replay_is_deterministic() {
     let env = make_env();
     let (cid, owner) = make_campaign_fixture(&env);
 
-    campaign_complete(cid, &owner).unwrap();
-    assert_eq!(get_campaign(cid).unwrap().state, CampaignState::Completed);
-
-    // Replay complete
-    assert_eq!(campaign_complete(cid, &owner), Err(Error::AlreadyExecuted));
-    // Replay execute step
-    assert_eq!(campaign_execute(cid, &owner), Err(Error::AlreadyExecuted));
-}
-
-/// once a campaign is Cancelled, any further cancel call is
-/// replay-protected and MUST return ProposalCancelled (terminal state).
-#[test]
-fn test_campaign_cancel_replay_fails() {
-    let env = make_env();
-    let (cid, owner) = make_campaign_fixture(&env);
-
-    campaign_cancel(cid, &owner).unwrap();
-    assert_eq!(get_campaign(cid).unwrap().state, CampaignState::Cancelled);
-
-    for i in 0..3 {
-        assert_eq!(campaign_cancel(cid, &owner), Err(Error::ProposalCancelled),
-                   "cancel replay #{}", i + 1);
-    }
-}
-
-/// deterministic check: 5 consecutive replays of complete all return AlreadyExecuted.
-#[test]
-fn test_campaign_complete_replay_is_deterministic() {
-    let env = make_env();
-    let (cid, owner) = make_campaign_fixture(&env);
-
-    campaign_complete(cid, &owner).unwrap();
+    sim_pause_campaign(cid, &owner).unwrap();
     for i in 0..5 {
-        assert_eq!(campaign_complete(cid, &owner), Err(Error::AlreadyExecuted),
-                   "replay #{}", i + 1);
+        assert_eq!(
+            sim_pause_campaign(cid, &owner),
+            Err(CampaignError::CampaignAlreadyPaused),
+            "pause replay #{} must return CampaignAlreadyPaused", i + 1
+        );
     }
 }
 
-/// executing on a Cancelled campaign is blocked — cross-state replay guard.
+/// resume_campaign is REPLAY-PROTECTED: resuming an already-active campaign
+/// must return CampaignAlreadyActive, not silently succeed or panic.
 #[test]
-fn test_campaign_execute_on_cancelled_fails() {
+fn replay_protection_campaign_execute_resume_on_active_returns_already_active() {
+    let env = make_env();
+    let (cid, owner) = make_campaign_fixture(&env); // starts Active
+
+    // Resume on already-active campaign
+    assert_eq!(
+        sim_resume_campaign(cid, &owner),
+        Err(CampaignError::CampaignAlreadyActive),
+        "resuming an active campaign must return CampaignAlreadyActive"
+    );
+    assert_eq!(camp_get(cid).unwrap().status, CampaignStatus::Active);
+}
+
+/// Full pause-resume-pause cycle: every repeated state transition is rejected.
+#[test]
+fn replay_protection_campaign_execute_pause_resume_cycle_no_cross_replay() {
     let env = make_env();
     let (cid, owner) = make_campaign_fixture(&env);
 
-    campaign_cancel(cid, &owner).unwrap();
-    assert_eq!(campaign_execute(cid, &owner), Err(Error::ProposalCancelled));
+    // Active -> Paused
+    sim_pause_campaign(cid, &owner).unwrap();
+    assert_eq!(camp_get(cid).unwrap().status, CampaignStatus::Paused);
+
+    // Replay pause — rejected
+    assert_eq!(sim_pause_campaign(cid, &owner), Err(CampaignError::CampaignAlreadyPaused));
+
+    // Paused -> Active
+    sim_resume_campaign(cid, &owner).unwrap();
+    assert_eq!(camp_get(cid).unwrap().status, CampaignStatus::Active);
+
+    // Replay resume — rejected
+    assert_eq!(sim_resume_campaign(cid, &owner), Err(CampaignError::CampaignAlreadyActive));
 }
 
-/// two distinct campaigns share no replay state — completing one does not affect the other.
+/// Terminal state (Completed) blocks all execute operations with typed errors.
 #[test]
-fn test_campaign_replay_no_cross_campaign_pollution() {
+fn replay_protection_campaign_execute_terminal_state_is_immutable() {
     let env = make_env();
-    reset_campaigns();
-    let owner1 = Address::generate(&env);
-    let owner2 = Address::generate(&env);
-    set_campaign(1, Campaign { owner: owner1.clone(), state: CampaignState::Active, execution_count: 0 });
-    set_campaign(2, Campaign { owner: owner2.clone(), state: CampaignState::Active, execution_count: 0 });
+    let owner = Address::generate(&env);
+    camp_reset();
+    camp_set(2, CampaignState { owner: owner.clone(), status: CampaignStatus::Completed });
 
-    campaign_complete(1, &owner1).unwrap();
-
-    // Campaign 2 must still be executable
-    assert_eq!(campaign_execute(2, &owner2).unwrap(), 1);
-    // Campaign 1 replays must still be blocked
-    assert_eq!(campaign_complete(1, &owner1), Err(Error::AlreadyExecuted));
+    assert_eq!(sim_pause_campaign(2, &owner),   Err(CampaignError::CampaignCompleted));
+    assert_eq!(sim_resume_campaign(2, &owner),  Err(CampaignError::CampaignCompleted));
 }

@@ -18,6 +18,10 @@ proptest = "1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[[test]]
+name = "contract_replay_regression_test"
+path = "tests/contract_replay_regression_test.rs"
+
 [features]
 legacy-tests = []
 
