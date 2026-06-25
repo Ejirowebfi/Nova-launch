@@ -8,21 +8,27 @@ datasource db {
 }
 
 model Token {
-  id            String   @id @default(uuid())
-  address       String   @unique
+  id            String        @id @default(uuid())
+  address       String        @unique
   creator       String
   name          String
   symbol        String
-  decimals      Int      @default(18)
+  decimals      Int           @default(18)
   totalSupply   BigInt
   initialSupply BigInt
   /// Defaults preserve replay/upgrade compatibility for legacy tokens that predate burn tracking.
-  totalBurned   BigInt   @default(0)
-  burnCount     Int      @default(0)
+  totalBurned   BigInt        @default(0)
+  burnCount     Int           @default(0)
   /// Remains nullable so migrated historical rows do not require synthetic metadata backfills.
   metadataUri   String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  /// When false the token is hidden from the public discovery endpoint.
+  isPublic      Boolean       @default(true)
+  /// Organisational category for marketplace filtering.
+  category      TokenCategory @default(OTHER)
+  /// Stellar network this token was deployed on.
+  network       String        @default("testnet")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
   burnRecords    BurnRecord[]
   analytics      Analytics[]
@@ -36,6 +42,17 @@ model Token {
   @@index([burnCount])
   @@index([name])
   @@index([symbol])
+  @@index([isPublic, createdAt])
+  @@index([category])
+  @@index([network])
+}
+
+enum TokenCategory {
+  DEFI
+  COMMUNITY
+  CREATOR
+  UTILITY
+  OTHER
 }
 
 model BurnRecord {
