@@ -37,6 +37,10 @@ import {
   extractTenantFromJwt,
   type TenantContext,
 } from "../middleware/tenancy";
+import {
+  SLOW_CONSUMER_THRESHOLD,
+  createSubscriptionMetrics,
+} from "./subscriptions";
 
 const MAX_DEPTH = parseInt(process.env.GRAPHQL_MAX_DEPTH ?? "6", 10);
 const MAX_COMPLEXITY = parseInt(
@@ -130,6 +134,8 @@ interface ConnectionExtra {
   tenant?: TenantContext;
   /** IDs of in-flight subscription operations counted toward the cap. */
   activeSubscriptionIds: Set<string>;
+  /** Running count of messages queued but not yet delivered (backpressure). */
+  queueDepth: number;
 }
 
 /**
@@ -177,6 +183,8 @@ export function attachGraphqlSubscriptions(
     path: "/graphql",
   });
 
+  const subMetrics = createSubscriptionMetrics();
+
   useServer(
     {
       schema,
@@ -194,6 +202,7 @@ export function attachGraphqlSubscriptions(
         const extra = ctx.extra as unknown as ConnectionExtra;
         extra.tenant = tenant;
         extra.activeSubscriptionIds = new Set();
+        extra.queueDepth = 0;
         return true;
       },
 
@@ -223,11 +232,31 @@ export function attachGraphqlSubscriptions(
         return undefined;
       },
 
-      // onComplete/onError fire for every operation; only release IDs we counted.
+      // Track outbound message queue depth; disconnect slow consumers.
+      onNext: (ctx, _msg, _args, result) => {
+        const extra = ctx.extra as unknown as ConnectionExtra;
+        extra.queueDepth = (extra.queueDepth ?? 0) + 1;
+
+        if (extra.queueDepth > SLOW_CONSUMER_THRESHOLD) {
+          subMetrics.slowConsumerDisconnected.inc();
+          // Close the raw WebSocket — graphql-ws provides it via ctx.extra.socket
+          const socket = (ctx.extra as any).socket;
+          if (socket) {
+            socket.close(1008, "Policy Violation: slow consumer");
+          }
+          return result; // return as-is; the socket close suppresses actual delivery
+        }
+
+        return result;
+      },
+
+      // Decrement depth when a message is acknowledged (onComplete of a subscribe op).
       onComplete: (ctx, msg) => {
-        (
-          ctx.extra as unknown as ConnectionExtra
-        )?.activeSubscriptionIds?.delete(msg.id);
+        const extra = ctx.extra as unknown as ConnectionExtra;
+        extra?.activeSubscriptionIds?.delete(msg.id);
+        if (extra?.queueDepth !== undefined && extra.queueDepth > 0) {
+          extra.queueDepth -= 1;
+        }
       },
 
       onError: (ctx, msg) => {
