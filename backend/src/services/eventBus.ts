@@ -39,6 +39,12 @@ export interface BusEvent<T = unknown> {
   timestamp: string;
   /** Optional correlation ID for distributed tracing */
   correlationId?: string;
+  /**
+   * Monotonically incrementing sequence number assigned at publish time.
+   * Used by the catchup endpoint so clients can request missed events
+   * after a WebSocket reconnect (#1372).
+   */
+  sequence: number;
 }
 
 export type EventHandler<T = unknown> = (
@@ -67,6 +73,9 @@ export class EventBus {
   private handlers = new Map<string, Map<string, EventHandler>>();
   private history: BusEvent[] = [];
   private deadLetterQueue: DeadLetterEntry[] = [];
+
+  /** Monotonically incrementing sequence counter (#1372). */
+  private _sequence = 0;
 
   /** Maximum events kept in history. 0 = unlimited. */
   private readonly maxHistory: number;
@@ -169,6 +178,7 @@ export class EventBus {
       payload,
       timestamp: new Date().toISOString(),
       correlationId: options.correlationId,
+      sequence: ++this._sequence,
     };
 
     this.recordHistory(event);
@@ -214,6 +224,12 @@ export class EventBus {
     this.handlers.clear();
     this.history = [];
     this.deadLetterQueue = [];
+    this._sequence = 0;
+  }
+
+  /** Current sequence counter value — highest sequence number emitted so far. */
+  get currentSequence(): number {
+    return this._sequence;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
