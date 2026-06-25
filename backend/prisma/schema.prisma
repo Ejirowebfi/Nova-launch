@@ -428,22 +428,23 @@ model IntegrationState {
   updatedAt DateTime @updatedAt
 }
 
-/// Frontend ErrorBoundary reports, enriched with whatever Stellar transaction
-/// context (txHash/ledger/wallet/route) was in flight when the render error
-/// was caught. Never stores private keys, seed phrases, or signed payloads.
-model ErrorReport {
-  id             String   @id @default(uuid())
-  message        String
-  stack          String?
-  componentStack String?
-  txHash         String?
-  ledgerSequence Int?
-  walletAddress  String?
-  route          String?
-  network        String?
-  createdAt      DateTime @default(now())
+/// Tracks pin status for content stored on IPFS via Pinata (#1403).
+/// Populated/updated by the pin monitor and the admin re-pin endpoint so the
+/// admin dashboard has durable visibility into pin health without re-querying
+/// Pinata for every request.
+model IPFSPin {
+  id            String    @id @default(uuid())
+  cid           String    @unique
+  tokenName     String?
+  tokenAddress  String?
+  pinned        Boolean   @default(false)
+  failureCount  Int       @default(0)
+  lastChecked   DateTime?
+  error         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  @@index([createdAt])
-  @@index([txHash])
-  @@index([walletAddress])
+  @@index([pinned])
+  @@index([failureCount])
+  @@index([tokenAddress])
 }
